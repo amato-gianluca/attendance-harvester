@@ -57,27 +57,3 @@ class TeamFilter:
 
         logger.info(f"Filtered {len(matched_teams)} teams out of {len(teams)} total")
         return matched_teams
-
-    def get_general_channel(self, channels: List[Dict]) -> Dict:
-        """
-        Get the General channel from a list of channels.
-
-        Args:
-            channels: List of channel objects
-
-        Returns:
-            General channel object or None if not found
-        """
-        for channel in channels:
-            # General channel has a specific membership type
-            if channel.get("membershipType") == "standard" and \
-               channel.get("displayName", "").lower() == "general":
-                return channel
-
-        # Fallback: return first channel with "general" in name
-        for channel in channels:
-            if "general" in channel.get("displayName", "").lower():
-                return channel
-
-        logger.warning("General channel not found in team")
-        return None

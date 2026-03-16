@@ -203,6 +203,54 @@ class GraphClient:
         logger.debug(f"Found {len(channels)} channels in team {team_id}")
         return channels
 
+    def get_team_channel(self, team_id: str, channel_id: str) -> dict | None:
+        """
+        Get a specific channel for a team.
+
+        Args:
+            team_id: Team ID
+            channel_id: Channel ID
+
+        Returns:
+            Channel object or None if not found
+        """
+        logger.debug(f"Fetching channel {channel_id} for team {team_id}")
+        response = self._make_request("GET", f"/teams/{team_id}/channels/{channel_id}")
+        if response.status_code == 404:
+            logger.warning("Channel %s not found in team %s", channel_id, team_id)
+            return None
+        return response.json()
+
+    def get_team_primary_channel(self, team_id: str) -> dict | None:
+        """
+        Get the primary (General) channel for a specific team.
+
+        Args:
+            team_id: Team ID
+
+        Returns:
+            Channel object or None if not found
+        """
+        logger.info(f"Fetching primary channel for team {team_id}")
+        response = self._make_request("GET", f"/teams/{team_id}/primaryChannel")
+        if response.status_code == 404:
+            logger.warning("Primary channel not found for team %s", team_id)
+            return None
+
+        primary_channel = response.json()
+
+        # Re-fetch by id when possible to normalize the channel payload.
+        # This is defensive: Microsoft documents /primaryChannel as returning a channel
+        # object, but there are reports of renamed primary channels still coming back
+        # with displayName="General".
+        # channel_id = primary_channel.get("id")
+        # if channel_id:
+        #     full_channel = self.get_team_channel(team_id, channel_id)
+        #     if full_channel:
+        #         return full_channel
+
+        return primary_channel
+
     def get_calendar_events(self, start_datetime: str, end_datetime: str) -> list[dict]:
         """
         Get calendar events in a time range.

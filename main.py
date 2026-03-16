@@ -348,7 +348,7 @@ def main():
         for team in filtered_teams:
             logger.info(f"  - {team['displayName']}")
 
-        # Step 4: Get channels (optionally filter to General only)
+        # Step 4: Get channels (optionally only the primary/General channel)
         logger.info("\nStep 4: Fetching channels")
         teams_with_channels = []
 
@@ -362,19 +362,18 @@ def main():
                     )
                     continue
 
-                channels = graph_client.get_team_channels(team["id"])
-
                 if config["meetings"].get("general_channel_only", True):
-                    general_channel = team_filter.get_general_channel(channels)
+                    general_channel = graph_client.get_team_primary_channel(team["id"])
                     if general_channel:
                         teams_with_channels.append({
                             "team": team,
                             "channel": general_channel
                         })
-                        logger.info(f"  ✓ {team['displayName']}: Found General channel")
+                        logger.info(f"  ✓ {team['displayName']}: Found primary channel")
                     else:
-                        logger.warning(f"  ✗ {team['displayName']}: General channel not found")
+                        logger.warning(f"  ✗ {team['displayName']}: Primary channel not found")
                 else:
+                    channels = graph_client.get_team_channels(team["id"])
                     for channel in channels:
                         teams_with_channels.append({
                             "team": team,
