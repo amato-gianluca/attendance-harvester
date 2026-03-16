@@ -189,6 +189,93 @@ class MeetingResolver:
         ]
         return " ".join(p for p in parts if isinstance(p, str)).lower()
 
+    @staticmethod
+    def _parse_datetime(value: dict | str | None) -> datetime | None:
+        """Parse Graph datetime payloads into timezone-aware datetimes."""
+        if isinstance(value, dict):
+            value = value.get("dateTime")
+
+        if not value or not isinstance(value, str):
+            return None
+
+        normalized = value.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+
+        return dt
+
+    def _report_checkpoint_key(self, report_id: str) -> str:
+        """Build checkpoint key for a report."""
+        return f"report:{report_id}"
+
+    def _get_context_key(self, online_meeting: dict, matched_contexts: list[dict]) -> str:
+        """Return a stable grouping key for a channel-scoped meeting."""
+        if matched_contexts:
+            channel_id = matched_contexts[0].get("channel", {}).get("id")
+            if channel_id:
+                return f"channel:{channel_id}"
+
+        meeting_thread_id = online_meeting.get("chatInfo", {}).get("threadId")
+        if meeting_thread_id:
+            return f"thread:{meeting_thread_id}"
+
+        meeting_id = online_meeting.get("id")
+        if meeting_id:
+            return f"meeting:{meeting_id}"
+
+        event_id = online_meeting.get("_calendar_event_id")
+        if event_id:
+            return f"event:{event_id}"
+
+        return "unknown"
+
+    def _get_meeting_time_bounds(self, meeting_candidate: dict) -> tuple[datetime | None, datetime | None]:
+        """Return parsed start/end times for a meeting candidate."""
+        meeting_info = meeting_candidate.get("meeting_info", {})
+        return (
+            self._parse_datetime(meeting_info.get("start")),
+            self._parse_datetime(meeting_info.get("end"))
+        )
+
+    def _get_report_time_bounds(self, report: dict) -> tuple[datetime | None, datetime | None]:
+        """Return parsed start/end times for an attendance report."""
+        return (
+            self._parse_datetime(report.get("meetingStartDateTime")),
+            self._parse_datetime(report.get("meetingEndDateTime"))
+        )
+
+    def _select_best_meeting_for_report(self, report: dict, meeting_candidates: list[dict]) -> dict | None:
+        """Assign a report to the nearest meeting in time."""
+        if not meeting_candidates:
+            return None
+
+        report_start, report_end = self._get_report_time_bounds(report)
+        if not report_start and not report_end:
+            return meeting_candidates[0]
+
+        def distance(candidate: dict) -> float:
+            meeting_start, meeting_end = self._get_meeting_time_bounds(candidate)
+            total = 0.0
+
+            if report_start and meeting_start:
+                total += abs((report_start - meeting_start).total_seconds())
+            elif report_start or meeting_start:
+                total += 10 ** 12
+
+            if report_end and meeting_end:
+                total += abs((report_end - meeting_end).total_seconds())
+            elif report_end or meeting_end:
+                total += 10 ** 12
+
+            return total
+
+        return min(meeting_candidates, key=distance)
+
     def _match_event_contexts(self, event: dict, online_meeting: dict,
                               teams_with_channels: list[dict]) -> list[dict]:
         """
@@ -251,13 +338,16 @@ class MeetingResolver:
 
         return deduped
 
-    def get_meeting_attendance(self, online_meeting: dict, skip_processed: bool = True) -> list[dict]:
+    def get_meeting_attendance(self, online_meeting: dict,
+                               meeting_candidates: list[dict] | None = None,
+                               skip_processed: bool = True) -> list[dict]:
         """
-        Get all attendance reports and records for a meeting.
+        Get attendance reports for a meeting or channel and map them to meetings.
 
         Args:
-            online_meeting: Online meeting object
-            skip_processed: Skip meetings already processed (from checkpoint)
+            online_meeting: Representative online meeting object used to query Graph
+            meeting_candidates: Meetings in the same channel eligible for report mapping
+            skip_processed: Skip reports already processed (from checkpoint)
 
         Returns:
             list of dictionaries with report and records data
@@ -265,12 +355,6 @@ class MeetingResolver:
         meeting_id = online_meeting.get("id")
         if not meeting_id:
             logger.warning("Meeting has no ID, skipping")
-            return []
-
-        # Check if already processed
-        checkpoint_key = f"{meeting_id}"
-        if skip_processed and checkpoint_key in self.processed_meetings:
-            logger.debug(f"Skipping already processed meeting: {meeting_id}")
             return []
 
         # Get attendance reports
@@ -281,29 +365,55 @@ class MeetingResolver:
                 f"No attendance reports for meeting: {online_meeting.get('_event', {}).get('subject', meeting_id)}")
             return []
 
+        candidates = meeting_candidates or [{
+            "meeting_id": meeting_id,
+            "meeting_info": online_meeting.get("_event", {}),
+            "teams_context": []
+        }]
+
         attendance_data = []
         for report in reports:
             report_id = report.get("id")
             if not report_id:
                 continue
 
+            checkpoint_key = self._report_checkpoint_key(report_id)
+            if skip_processed and checkpoint_key in self.processed_meetings:
+                logger.debug(f"Skipping already processed report: {report_id}")
+                continue
+
+            best_meeting = self._select_best_meeting_for_report(report, candidates)
+            if not best_meeting:
+                logger.debug(f"Could not map report {report_id} to a meeting")
+                continue
+
             # Get attendance records for this report
             records = self.client.get_attendance_records(meeting_id, report_id)
 
+            mapped_meeting_id = best_meeting.get("meeting_id", meeting_id)
+            mapped_meeting_info = best_meeting.get("meeting_info", online_meeting.get("_event", {}))
+
             attendance_data.append({
-                "meeting_id": meeting_id,
-                "meeting_info": online_meeting.get("_event", {}),
+                "meeting_id": mapped_meeting_id,
+                "meeting_info": mapped_meeting_info,
                 "report_id": report_id,
                 "report_data": report,
-                "attendance_records": records
+                "attendance_records": records,
+                "teams_context": best_meeting.get("teams_context", []),
+                "source_meeting_id": meeting_id
             })
 
             logger.info(
-                f"Extracted {len(records)} attendance records from report {report_id}")
+                "Extracted %d attendance records from report %s mapped to '%s'",
+                len(records),
+                report_id,
+                mapped_meeting_info.get("subject", mapped_meeting_id)
+            )
 
-        # Mark as processed
-        self.processed_meetings.add(checkpoint_key)
-        self._save_checkpoints()
+            self.processed_meetings.add(checkpoint_key)
+
+        if attendance_data:
+            self._save_checkpoints()
 
         return attendance_data
 
@@ -332,6 +442,7 @@ class MeetingResolver:
 
         all_attendance = []
         matched_events = 0
+        meetings_by_context: dict[str, dict] = {}
 
         # Process each meeting
         for event in all_events:
@@ -343,7 +454,6 @@ class MeetingResolver:
             if not online_meeting:
                 continue
 
-
             matched_contexts = self._match_event_contexts(
                 event, online_meeting, teams_with_channels)
             if not matched_contexts:
@@ -352,14 +462,41 @@ class MeetingResolver:
 
             matched_events += 1
 
-            logger.info("")
-            # Get attendance data
-            attendance_list = self.get_meeting_attendance(online_meeting)
+            context_key = self._get_context_key(online_meeting, matched_contexts)
+            group = meetings_by_context.setdefault(context_key, {
+                "online_meeting": online_meeting if online_meeting.get("id") else None,
+                "meetings": []
+            })
 
-            # Enrich with matched team/channel context
-            for attendance in attendance_list:
-                attendance["teams_context"] = matched_contexts
-                all_attendance.append(attendance)
+            if not group["online_meeting"] and online_meeting.get("id"):
+                group["online_meeting"] = online_meeting
+
+            group["meetings"].append({
+                "meeting_id": online_meeting.get("id", online_meeting.get("_calendar_event_id", "")),
+                "meeting_info": online_meeting.get("_event", {}),
+                "teams_context": matched_contexts
+            })
+
+        for context_key, group in meetings_by_context.items():
+            representative_meeting = group.get("online_meeting")
+            if not representative_meeting:
+                logger.debug(
+                    "Skipping context %s because no resolvable meeting ID is available",
+                    context_key
+                )
+                continue
+
+            logger.info("")
+            logger.info(
+                "Processing channel attendance for %s using %d candidate meetings",
+                context_key,
+                len(group["meetings"])
+            )
+            attendance_list = self.get_meeting_attendance(
+                representative_meeting,
+                meeting_candidates=group["meetings"]
+            )
+            all_attendance.extend(attendance_list)
 
         logger.info(
             "Extracted attendance data for %d reports across %d matched meetings (out of %d calendar meetings)",
