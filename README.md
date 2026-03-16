@@ -14,7 +14,7 @@ A Python tool to automatically scan Microsoft Teams, filter teams by name, disco
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- Python 3.10 or higher
 - Microsoft Azure AD application with appropriate permissions (see Setup section)
 - Access to Microsoft Teams with organizer rights for meetings you want to track
 
@@ -163,8 +163,11 @@ azure:
      general_channel_only: true                 # Only scan General channel
 
    output:
-     directory: "./output"                      # Output directory
+     directory: "./output"                      # Base output directory
+     csv_directory: "./output/csv"              # CSV files
+     json_directory: "./output/json"            # JSON files
      format: "both"                             # "csv", "json", or "both"
+     min_csv_report_duration_seconds: 0         # Skip CSV for shorter reports; JSON unaffected
    ```
 
 ### Team Filter Examples
@@ -210,6 +213,35 @@ python main.py --team-regex "^Project.*"
 
 # Override lookback period
 python main.py --lookback-days 7
+
+# Force CSV regeneration from already-downloaded JSON files
+python main.py --rebuild-csv output
+
+# Only export CSV when report duration is at least 10 minutes
+python main.py --min-csv-report-duration-seconds 600
+```
+
+### Rebuild CSV From Existing JSON Files
+
+If you already have attendance JSON files in `output/`, you can regenerate CSVs without authenticating or connecting to Teams:
+
+```bash
+# Rebuild from every JSON file in the output directory
+python main.py --rebuild-csv output
+
+# Rebuild from specific files
+python main.py --rebuild-csv output/file1.json output/file2.json
+
+# Rebuild using a glob
+python main.py --rebuild-csv "output/*_attendance.json"
+```
+
+This mode reuses the same exporter and naming pattern from `config.yaml`, so the generated CSV filenames stay consistent with the original run while always forcing CSV output regardless of `output.format`.
+
+The CSV duration filter still applies in this mode. For example:
+
+```bash
+python main.py --rebuild-csv output --min-csv-report-duration-seconds 600
 ```
 
 ### First Run - Authentication
@@ -232,17 +264,17 @@ and enter the code XXXXXXXXX to authenticate.
 
 ## Output Files
 
-The tool creates files in the output directory with this naming pattern:
+The tool creates files in separate output directories with this naming pattern:
 
 ```
-{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance.csv
-{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance.json
+csv/{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance.csv
+json/{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance.json
 ```
 
 Example:
 ```
-Marketing_Team_General_20260306_1430_a1b2c3d4_e5f6g7h8_attendance.csv
-Marketing_Team_General_20260306_1430_a1b2c3d4_e5f6g7h8_attendance.json
+output/csv/Marketing_Team_General_20260306_1430_a1b2c3d4_e5f6g7h8_attendance.csv
+output/json/Marketing_Team_General_20260306_1430_a1b2c3d4_e5f6g7h8_attendance.json
 ```
 
 ### CSV Format

@@ -3,8 +3,6 @@ Microsoft Graph API client for Teams, channels, meetings, and attendance.
 """
 import logging
 import time
-from typing import Any, Dict, List, Optional
-from urllib.parse import quote
 
 import requests
 
@@ -22,7 +20,8 @@ class GraphClient:
     BASE_URL = "https://graph.microsoft.com/v1.0"
 
     def __init__(self, access_token: str, max_retries: int = 3,
-                 retry_backoff_factor: int = 2, timeout: int = 30):
+                 retry_backoff_factor: int = 2, timeout: int = 30,
+                 user_id: str | None = None):
         """
         Initialize Graph API client.
 
@@ -31,17 +30,31 @@ class GraphClient:
             max_retries: Maximum number of retries for failed requests
             retry_backoff_factor: Exponential backoff factor (seconds)
             timeout: Request timeout in seconds
+            user_id: User ID/UPN used for user-scoped APIs in confidential mode
         """
         self.access_token = access_token
         self.max_retries = max_retries
         self.retry_backoff_factor = retry_backoff_factor
         self.timeout = timeout
+        self.user_id = user_id
 
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         })
+
+    def _user_path(self, relative_path: str) -> str:
+        """
+        Build a user-scoped Graph endpoint.
+
+        In public delegated mode, this returns /me/{relative_path}.
+        In confidential mode (user_id provided), this returns /users/{user_id}/{relative_path}.
+        """
+        normalized = relative_path.lstrip("/")
+        if self.user_id:
+            return f"/users/{self.user_id}/{normalized}"
+        return f"/me/{normalized}"
 
     def _make_request(self, method: str, url: str, **kwargs) -> requests.Response:
         """
@@ -71,18 +84,25 @@ class GraphClient:
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After",
                                                            self.retry_backoff_factor ** (attempt + 1)))
-                    logger.warning(f"Rate limited. Retrying after {retry_after}s")
+                    logger.warning(
+                        f"Rate limited. Retrying after {retry_after}s")
                     time.sleep(retry_after)
                     continue
 
                 # Handle server errors (5xx) with retry
                 if 500 <= response.status_code < 600:
                     wait_time = self.retry_backoff_factor ** (attempt + 1)
-                    logger.warning(f"Server error {response.status_code}. Retrying after {wait_time}s")
+                    logger.warning(
+                        f"Server error {response.status_code}. Retrying after {wait_time}s")
                     time.sleep(wait_time)
                     continue
 
-                # Raise for client errors (4xx) - no retry
+                # Handle 404 (not found) gracefully - return without raising
+                # 404 is expected for meetings without accessible attendance data
+                if response.status_code == 404:
+                    return response
+
+                # Raise for other client errors (4xx)
                 if 400 <= response.status_code < 500:
                     error_msg = f"Client error {response.status_code}: {response.text}"
                     logger.error(error_msg)
@@ -93,15 +113,18 @@ class GraphClient:
 
             except requests.exceptions.RequestException as e:
                 if attempt == self.max_retries - 1:
-                    raise GraphAPIError(f"Request failed after {self.max_retries} attempts: {e}")
+                    raise GraphAPIError(
+                        f"Request failed after {self.max_retries} attempts: {e}")
 
                 wait_time = self.retry_backoff_factor ** (attempt + 1)
-                logger.warning(f"Request failed: {e}. Retrying after {wait_time}s")
+                logger.warning(
+                    f"Request failed: {e}. Retrying after {wait_time}s")
                 time.sleep(wait_time)
 
-        raise GraphAPIError(f"Request failed after {self.max_retries} attempts")
+        raise GraphAPIError(
+            f"Request failed after {self.max_retries} attempts")
 
-    def _paginate(self, url: str, params: Optional[Dict] = None) -> List[Dict]:
+    def _paginate(self, url: str, params: dict | None = None) -> list[dict]:
         """
         Handle pagination for Graph API responses.
 
@@ -110,7 +133,7 @@ class GraphClient:
             params: Query parameters
 
         Returns:
-            List of all items from paginated response
+            list of all items from paginated response, or empty list if 404
         """
         items = []
         next_link = url
@@ -118,48 +141,54 @@ class GraphClient:
         while next_link:
             # Only use params for the first request
             response = self._make_request("GET", next_link,
-                                         params=params if next_link == url else None)
+                                          params=params if next_link == url else None)
+
+            # Handle 404 (not found) - return empty list
+            if response.status_code == 404:
+                return []
+
             data = response.json()
 
             # Add items from current page
             if "value" in data:
                 items.extend(data["value"])
-                logger.debug(f"Fetched {len(data['value'])} items, total: {len(items)}")
+                logger.debug(
+                    f"Fetched {len(data['value'])} items, total: {len(items)}")
 
             # Get next page link
             next_link = data.get("@odata.nextLink")
 
         return items
 
-    def get_joined_teams(self) -> List[Dict]:
+    def get_joined_teams(self) -> list[dict]:
         """
         Get all teams the user has joined.
 
         Returns:
-            List of team objects
+            list of team objects
         """
         logger.info("Fetching joined teams")
-        teams = self._paginate("/me/joinedTeams")
+        teams = self._paginate(self._user_path("joinedTeams"))
         logger.info(f"Found {len(teams)} joined teams")
         return teams
 
-    def get_associated_teams(self) -> List[Dict]:
+    def get_associated_teams(self) -> list[dict]:
         """
         Get associated teams (includes shared channel hosts).
 
         Returns:
-            List of associated team info objects
+            list of associated team info objects
         """
         logger.info("Fetching associated teams")
         try:
-            teams = self._paginate("/me/teamwork/associatedTeams")
+            teams = self._paginate(self._user_path("teamwork/associatedTeams"))
             logger.info(f"Found {len(teams)} associated teams")
             return teams
         except GraphAPIError as e:
             logger.warning(f"Failed to fetch associated teams: {e}")
             return []
 
-    def get_team_channels(self, team_id: str) -> List[Dict]:
+    def get_team_channels(self, team_id: str) -> list[dict]:
         """
         Get all channels for a specific team.
 
@@ -167,14 +196,14 @@ class GraphClient:
             team_id: Team ID
 
         Returns:
-            List of channel objects
+            list of channel objects
         """
         logger.debug(f"Fetching channels for team {team_id}")
         channels = self._paginate(f"/teams/{team_id}/channels")
         logger.debug(f"Found {len(channels)} channels in team {team_id}")
         return channels
 
-    def get_calendar_events(self, start_datetime: str, end_datetime: str) -> List[Dict]:
+    def get_calendar_events(self, start_datetime: str, end_datetime: str) -> list[dict]:
         """
         Get calendar events in a time range.
 
@@ -183,25 +212,27 @@ class GraphClient:
             end_datetime: End time in ISO 8601 format
 
         Returns:
-            List of event objects with online meeting details
+            list of event objects with online meeting details
         """
-        logger.info(f"Fetching calendar events from {start_datetime} to {end_datetime}")
+        logger.info(
+            f"Fetching calendar events from {start_datetime} to {end_datetime}")
         params = {
             "startDateTime": start_datetime,
             "endDateTime": end_datetime,
-            "$select": "subject,start,end,isOnlineMeeting,onlineMeetingProvider,onlineMeeting,organizer"
+            "$select": "id,subject,start,end,isOnlineMeeting,onlineMeetingProvider,onlineMeeting,organizer,location,locations,bodyPreview"
         }
-        events = self._paginate("/me/calendarView", params=params)
+        events = self._paginate(self._user_path("calendarView"), params=params)
 
         # Filter to Teams meetings only
         teams_events = [e for e in events
-                       if e.get("isOnlineMeeting") and
-                       e.get("onlineMeetingProvider") == "teamsForBusiness"]
+                        if e.get("isOnlineMeeting") and
+                        e.get("onlineMeetingProvider") == "teamsForBusiness"]
 
-        logger.info(f"Found {len(teams_events)} Teams meetings out of {len(events)} total events")
+        logger.info(
+            f"Found {len(teams_events)} Teams meetings out of {len(events)} total events")
         return teams_events
 
-    def get_online_meeting_by_join_url(self, join_url: str) -> Optional[Dict]:
+    def get_online_meeting_by_join_url(self, join_url: str) -> dict | None:
         """
         Get online meeting details by join URL.
 
@@ -209,21 +240,22 @@ class GraphClient:
             join_url: Teams meeting join URL
 
         Returns:
-            Online meeting object or None if not found
+            Online meeting object or None if not found (expected for non-organized meetings)
         """
-        encoded_url = quote(join_url, safe='')
-        filter_param = f"JoinWebUrl eq '{encoded_url}'"
-
+        filter_param = f"JoinWebUrl eq '{join_url}'"
         try:
-            meetings = self._paginate("/me/onlineMeetings", params={"$filter": filter_param})
+            meetings = self._paginate(self._user_path(
+                "onlineMeetings"), params={"$filter": filter_param})
             if meetings:
                 return meetings[0]
+            logger.debug(
+                f"No online meeting found for join URL (expected for non-organized meetings)")
             return None
         except GraphAPIError as e:
-            logger.warning(f"Failed to get online meeting by join URL: {e}")
+            logger.debug(f"Could not retrieve online meeting by join URL: {e}")
             return None
 
-    def get_attendance_reports(self, meeting_id: str) -> List[Dict]:
+    def get_attendance_reports(self, meeting_id: str) -> list[dict]:
         """
         Get all attendance reports for an online meeting.
 
@@ -231,18 +263,27 @@ class GraphClient:
             meeting_id: Online meeting ID
 
         Returns:
-            List of attendance report objects
+            list of attendance report objects, or empty list if not found/no access
         """
         logger.debug(f"Fetching attendance reports for meeting {meeting_id}")
         try:
-            reports = self._paginate(f"/me/onlineMeetings/{meeting_id}/attendanceReports")
-            logger.debug(f"Found {len(reports)} attendance reports for meeting {meeting_id}")
+            reports = self._paginate(self._user_path(
+                f"onlineMeetings/{meeting_id}/attendanceReports"))
+            if reports:
+                logger.debug(
+                    f"Found {len(reports)} attendance reports for meeting {meeting_id}")
+            else:
+                logger.debug(
+                    f"No attendance reports for meeting {meeting_id}. "
+                    "This is normal - reports are only available for meetings you organized."
+                )
             return reports
         except GraphAPIError as e:
-            logger.warning(f"Failed to fetch attendance reports for meeting {meeting_id}: {e}")
+            logger.warning(
+                f"Failed to fetch attendance reports for meeting {meeting_id}: {e}")
             return []
 
-    def get_attendance_records(self, meeting_id: str, report_id: str) -> List[Dict]:
+    def get_attendance_records(self, meeting_id: str, report_id: str) -> list[dict]:
         """
         Get attendance records for a specific report.
 
@@ -251,15 +292,18 @@ class GraphClient:
             report_id: Attendance report ID
 
         Returns:
-            List of attendance record objects
+            list of attendance record objects, or empty list if not found/no access
         """
         logger.debug(f"Fetching attendance records for report {report_id}")
         try:
             records = self._paginate(
-                f"/me/onlineMeetings/{meeting_id}/attendanceReports/{report_id}/attendanceRecords"
+                self._user_path(
+                    f"onlineMeetings/{meeting_id}/attendanceReports/{report_id}/attendanceRecords")
             )
-            logger.debug(f"Found {len(records)} attendance records for report {report_id}")
+            logger.debug(
+                f"Found {len(records)} attendance records for report {report_id}")
             return records
         except GraphAPIError as e:
-            logger.error(f"Failed to fetch attendance records for report {report_id}: {e}")
+            logger.debug(
+                f"Failed to fetch attendance records for report {report_id}: {e}")
             return []

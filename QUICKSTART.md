@@ -62,6 +62,9 @@ meetings:
 # Change output format
 output:
   format: "csv"  # Only CSV (or "json" or "both")
+  csv_directory: "./output/csv"
+  json_directory: "./output/json"
+  min_csv_report_duration_seconds: 0
 ```
 
 ## Command-Line Options
@@ -78,6 +81,12 @@ python main.py --lookback-days 7
 
 # Clear cache and re-authenticate
 python main.py --clear-cache
+
+# Force CSV-only rebuild from already-downloaded JSON files
+python main.py --rebuild-csv output
+
+# Skip CSV output for reports shorter than 10 minutes
+python main.py --min-csv-report-duration-seconds 600
 ```
 
 ## Troubleshooting

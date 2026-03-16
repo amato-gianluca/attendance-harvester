@@ -6,17 +6,27 @@ Scans subscribed Teams, filters by name regex, discovers meetings,
 downloads attendance logs, and exports to CSV/JSON.
 """
 import argparse
+import json
 import logging
 import sys
+from typing import Any
 from pathlib import Path
+from uuid import UUID
 
 import yaml
 
-from src.auth import Authenticator, AuthenticationError
-from src.graph_client import GraphClient, GraphAPIError
-from src.team_filter import TeamFilter
-from src.meeting_resolver import MeetingResolver
 from src.exporter import AttendanceExporter
+
+
+def _is_valid_guid(value: Any) -> bool:
+    """Return True if value is a valid GUID/UUID string."""
+    if not value or not isinstance(value, str):
+        return False
+    try:
+        UUID(value)
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
 
 
 def setup_logging(verbose: bool = False):
@@ -47,6 +57,67 @@ def load_config(config_path: str) -> dict:
         config = yaml.safe_load(f)
 
     return config
+
+
+def load_attendance_from_json_inputs(json_inputs: list[str]) -> list[dict]:
+    """
+    Load attendance payloads from JSON files, directories, or glob patterns.
+
+    Args:
+        json_inputs: One or more filesystem inputs
+
+    Returns:
+        List of attendance data dictionaries
+    """
+    json_files: list[Path] = []
+
+    for raw_input in json_inputs:
+        path = Path(raw_input)
+
+        if path.is_dir():
+            json_files.extend(sorted(path.rglob("*.json")))
+            continue
+
+        matches = sorted(Path().glob(raw_input))
+        if matches:
+            json_files.extend(match for match in matches if match.is_file() and match.suffix.lower() == ".json")
+            continue
+
+        if path.is_file() and path.suffix.lower() == ".json":
+            json_files.append(path)
+            continue
+
+        raise FileNotFoundError(f"No JSON files found for input: {raw_input}")
+
+    unique_files = list(dict.fromkeys(file.resolve() for file in json_files))
+    attendance_data: list[dict] = []
+
+    for json_file in unique_files:
+        with open(json_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"JSON file must contain a single attendance object: {json_file}")
+
+        attendance_data.append(payload)
+
+    return attendance_data
+
+
+def build_exporter(config: dict) -> AttendanceExporter:
+    """Build exporter with per-format output directories."""
+    output_config = config["output"]
+    output_dir = output_config["directory"]
+    csv_output_dir = output_config.get("csv_directory")
+    json_output_dir = output_config.get("json_directory")
+
+    return AttendanceExporter(
+        output_dir=output_dir,
+        filename_pattern=output_config["filename_pattern"],
+        csv_output_dir=csv_output_dir,
+        json_output_dir=json_output_dir,
+        min_csv_report_duration_seconds=output_config.get("min_csv_report_duration_seconds", 0)
+    )
 
 
 def main():
@@ -84,6 +155,22 @@ def main():
         type=int,
         help="Override lookback days from config"
     )
+    parser.add_argument(
+        "--lookahead-days",
+        type=int,
+        help="Override lookahead days from config"
+    )
+    parser.add_argument(
+        "--rebuild-csv",
+        nargs="+",
+        metavar="PATH",
+        help="Force CSV regeneration from existing attendance JSON file(s), directory, or glob without connecting to Teams"
+    )
+    parser.add_argument(
+        "--min-csv-report-duration-seconds",
+        type=int,
+        help="Only export CSV for reports whose meeting duration is at least this many seconds; JSON export is unaffected"
+    )
 
     args = parser.parse_args()
 
@@ -105,14 +192,74 @@ def main():
     # Override config with command-line arguments
     if args.team_regex:
         config["team_filter"]["regex"] = args.team_regex
-    if args.lookback_days:
+    if args.lookback_days is not None:
         config["meetings"]["lookback_days"] = args.lookback_days
+    if args.lookahead_days is not None:
+        config["meetings"]["lookahead_days"] = args.lookahead_days
+    if args.min_csv_report_duration_seconds is not None:
+        config["output"]["min_csv_report_duration_seconds"] = args.min_csv_report_duration_seconds
+
+    authentication_error = None
+    graph_api_error = None
 
     try:
+        json_replay_inputs = args.rebuild_csv
+        if json_replay_inputs:
+            logger.info("Step 1: Loading attendance data from existing JSON files")
+            attendance_data = load_attendance_from_json_inputs(json_replay_inputs)
+
+            if not attendance_data:
+                logger.warning("No attendance data found in the provided JSON input(s).")
+                return
+
+            logger.info(f"✓ Loaded {len(attendance_data)} attendance payload(s)")
+
+            logger.info("\nStep 2: Exporting attendance data")
+            exporter = build_exporter(config)
+
+            export_format = "csv"
+            created_files = exporter.export_batch(attendance_data, format=export_format)
+
+            csv_output_dir = config["output"].get("csv_directory") or str(Path(config["output"]["directory"]) / "csv")
+            logger.info(f"✓ Created {len(created_files)} output files in {csv_output_dir}")
+
+            logger.info("\n" + "=" * 70)
+            logger.info("SUMMARY")
+            logger.info("=" * 70)
+            logger.info(f"JSON files loaded: {len(attendance_data)}")
+            logger.info(f"Files created: {len(created_files)}")
+            logger.info(f"CSV output directory: {csv_output_dir}")
+            logger.info("=" * 70)
+            logger.info("✓ CSV rebuild completed successfully")
+            return
+
+        from src.auth import Authenticator, AuthenticationError
+        from src.graph_client import GraphClient, GraphAPIError
+        from src.team_filter import TeamFilter
+        from src.meeting_resolver import MeetingResolver
+        authentication_error = AuthenticationError
+        graph_api_error = GraphAPIError
+
         # Step 1: Authenticate
         logger.info("Step 1: Authenticating with Microsoft Graph API")
 
+        auth_mode = config.get("auth", {}).get("mode", "public").strip().lower()
+        if auth_mode not in {"public", "confidential"}:
+            raise ValueError("auth.mode must be either 'public' or 'confidential'")
+
         client_id = config["azure"]["client_id"]
+        client_secret = config.get("azure", {}).get("client_secret")
+        if not client_secret:
+            # Optional env override, recommended for secrets
+            import os
+            client_secret = os.getenv("TEAMS_HARVESTER_CLIENT_SECRET")
+
+        if auth_mode == "confidential":
+            logger.info("Using confidential client credentials mode")
+            scopes_for_auth = ["https://graph.microsoft.com/.default"]
+        else:
+            logger.info("Using public device code mode")
+            scopes_for_auth = config["scopes"]
 
         # Check if using well-known public client
         well_known_clients = {
@@ -121,18 +268,22 @@ def main():
             "d3590ed6-52b3-4102-aeff-aad2292ab01c": "Microsoft Office"
         }
 
-        if client_id in well_known_clients:
+        if auth_mode == "public" and client_id in well_known_clients:
             logger.info(f"Using {well_known_clients[client_id]} public client (no Azure app needed)")
             logger.info("You'll authenticate with your Microsoft credentials in the browser")
-        else:
+        elif auth_mode == "public":
             logger.info("Using custom Azure AD application")
+        else:
+            logger.info("Using custom Azure AD application with app-only token")
 
         authenticator = Authenticator(
             client_id=client_id,
             authority=config["azure"]["authority"],
-            scopes=config["scopes"],
+            scopes=scopes_for_auth,
             cache_dir=config["cache"]["directory"],
-            cache_filename=config["cache"]["token_cache"]
+            cache_filename=config["cache"]["token_cache"],
+            auth_mode=auth_mode,
+            client_secret=client_secret
         )
 
         if args.clear_cache:
@@ -144,11 +295,19 @@ def main():
 
         # Step 2: Initialize Graph client
         logger.info("\nStep 2: Initializing Graph API client")
+        target_user_id = config.get("auth", {}).get("target_user_id")
+        if auth_mode == "confidential" and not target_user_id:
+            raise ValueError(
+                "Confidential mode requires auth.target_user_id in config (UPN or object ID), "
+                "used for /users/{id}/... Graph calls."
+            )
+
         graph_client = GraphClient(
             access_token=access_token,
             max_retries=config["api"]["max_retries"],
             retry_backoff_factor=config["api"]["retry_backoff_factor"],
-            timeout=config["api"]["timeout"]
+            timeout=config["api"]["timeout"],
+            user_id=target_user_id if auth_mode == "confidential" else None
         )
         logger.info("✓ Graph API client initialized")
 
@@ -161,12 +320,22 @@ def main():
             # Merge, avoiding duplicates by ID
             team_ids = {t["id"] for t in teams}
             for assoc_team in associated:
-                if assoc_team.get("teamId") not in team_ids:
+                assoc_team_id = assoc_team.get("teamId")
+                if not _is_valid_guid(assoc_team_id):
+                    logger.debug(
+                        "Skipping associated team with non-GUID teamId: %s (displayName=%s)",
+                        assoc_team_id,
+                        assoc_team.get("displayName", "Unknown")
+                    )
+                    continue
+
+                if assoc_team_id not in team_ids:
                     # Convert associated team format to regular team format
                     teams.append({
-                        "id": assoc_team.get("teamId"),
+                        "id": assoc_team_id,
                         "displayName": assoc_team.get("displayName", "Unknown")
                     })
+                    team_ids.add(assoc_team_id)
 
         team_filter = TeamFilter(config["team_filter"]["regex"])
         filtered_teams = team_filter.filter_teams(teams)
@@ -185,6 +354,14 @@ def main():
 
         for team in filtered_teams:
             try:
+                if not _is_valid_guid(team.get("id", "")):
+                    logger.warning(
+                        "  ✗ Skipping %s: invalid team id '%s' (not a GUID)",
+                        team.get("displayName", "Unknown"),
+                        team.get("id", "")
+                    )
+                    continue
+
                 channels = graph_client.get_team_channels(team["id"])
 
                 if config["meetings"].get("general_channel_only", True):
@@ -219,10 +396,12 @@ def main():
             checkpoint_file=str(checkpoint_file)
         )
 
-        lookback_days = config["meetings"]["lookback_days"]
+        lookback_days = config["meetings"].get("lookback_days", 30)
+        lookahead_days = config["meetings"].get("lookahead_days", 0)
         attendance_data = meeting_resolver.extract_all_attendance(
             teams_with_channels=teams_with_channels,
-            lookback_days=lookback_days
+            lookback_days=lookback_days,
+            lookahead_days=lookahead_days
         )
 
         if not attendance_data:
@@ -236,15 +415,14 @@ def main():
 
         # Step 6: Export attendance data
         logger.info("\nStep 6: Exporting attendance data")
-        exporter = AttendanceExporter(
-            output_dir=config["output"]["directory"],
-            filename_pattern=config["output"]["filename_pattern"]
-        )
+        exporter = build_exporter(config)
 
         export_format = config["output"]["format"]
         created_files = exporter.export_batch(attendance_data, format=export_format)
 
-        logger.info(f"✓ Created {len(created_files)} output files in {config['output']['directory']}")
+        csv_output_dir = config["output"].get("csv_directory") or str(Path(config["output"]["directory"]) / "csv")
+        json_output_dir = config["output"].get("json_directory") or str(Path(config["output"]["directory"]) / "json")
+        logger.info(f"✓ Created {len(created_files)} output files")
 
         # Summary
         logger.info("\n" + "=" * 70)
@@ -253,22 +431,26 @@ def main():
         logger.info(f"Teams scanned: {len(filtered_teams)}")
         logger.info(f"Attendance reports extracted: {len(attendance_data)}")
         logger.info(f"Files created: {len(created_files)}")
-        logger.info(f"Output directory: {config['output']['directory']}")
+        if export_format in ("csv", "both"):
+            logger.info(f"CSV output directory: {csv_output_dir}")
+        if export_format in ("json", "both"):
+            logger.info(f"JSON output directory: {json_output_dir}")
         logger.info("=" * 70)
         logger.info("✓ Attendance harvesting completed successfully")
 
-    except AuthenticationError as e:
-        logger.error(f"Authentication failed: {e}")
-        sys.exit(1)
-    except GraphAPIError as e:
-        logger.error(f"Graph API error: {e}")
-        sys.exit(1)
     except KeyboardInterrupt:
         logger.warning("\nOperation cancelled by user")
         sys.exit(130)
     except Exception as e:
-        logger.exception(f"Unexpected error: {e}")
-        sys.exit(1)
+        if authentication_error and isinstance(e, authentication_error):
+            logger.error(f"Authentication failed: {e}")
+            sys.exit(1)
+        elif graph_api_error and isinstance(e, graph_api_error):
+            logger.error(f"Graph API error: {e}")
+            sys.exit(1)
+        else:
+            logger.exception(f"Unexpected error: {e}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

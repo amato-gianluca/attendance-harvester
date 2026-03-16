@@ -13,6 +13,7 @@ azure:
   # Option 2: Use your own Azure AD application
   # If you created your own app, replace the client_id above with yours
   # client_id: "YOUR_CLIENT_ID_HERE"
+  # client_secret: "YOUR_CLIENT_SECRET_HERE"  # Required only for auth.mode=confidential
 
   # Tenant ID - use "common" to work with any Microsoft account, or your specific tenant ID
   tenant_id: "common"  # or "YOUR_TENANT_ID_HERE" for single tenant
@@ -25,6 +26,17 @@ scopes:
   - "Calendars.Read"
   - "OnlineMeetings.Read"
   - "OnlineMeetingArtifact.Read.All"
+
+# Authentication mode settings
+auth:
+  # public: delegated auth with browser device code (default)
+  # confidential: app-only client credentials (requires azure.client_secret and admin-consented application permissions)
+  mode: "public"
+
+  # Required only for auth.mode=confidential.
+  # Used for user-scoped Graph endpoints /users/{target_user_id}/...
+  # Can be user principal name (e.g. user@contoso.com) or object ID.
+  target_user_id: ""
 
 # Team Filtering
 team_filter:
@@ -40,6 +52,9 @@ meetings:
   # Number of days to look back for meetings
   lookback_days: 30
 
+  # Number of days to look ahead for meetings (future)
+  lookahead_days: 0
+
   # Whether to include associated teams (shared channels)
   include_associated_teams: true
 
@@ -48,11 +63,22 @@ meetings:
 
 # Output Settings
 output:
-  # Directory for storing attendance logs
+  # Base directory for exported attendance logs
   directory: "./output"
+
+  # Optional per-format directories
+  # Defaults:
+  #   csv_directory: "./output/csv"
+  #   json_directory: "./output/json"
+  csv_directory: "./output/csv"
+  json_directory: "./output/json"
 
   # Save format: "both", "csv", "json"
   format: "both"
+
+  # Only export CSV when the report duration is at least this many seconds.
+  # JSON export is never filtered by this setting.
+  min_csv_report_duration_seconds: 0
 
   # Filename pattern (available variables: team_name, channel_name, meeting_date, meeting_id, report_id)
   # Default: {team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance
