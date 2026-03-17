@@ -83,7 +83,8 @@ output:
   # JSON export is never filtered by this setting.
   min_csv_report_duration_seconds: 0
 
-  # Filename pattern (available variables: team_name, channel_name, meeting_date, meeting_id, report_id)
+  # Filename pattern (available variables: team_name, channel_name, meeting_date,
+  # meeting_subject, meeting_id, report_start, report_id)
   # Default: {team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance
   filename_pattern: "{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance"
 

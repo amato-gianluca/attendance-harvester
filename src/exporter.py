@@ -133,6 +133,8 @@ class AttendanceExporter:
         # Extract data for filename
         team_name = "unknown_team"
         channel_name = "unknown_channel"
+        meeting_subject = meeting_info.get("subject", "unknown_subject")
+        report_start = "unknown_report_start"
 
         # Try to get team/channel from context
         teams_context = attendance_data.get("teams_context", [])
@@ -148,10 +150,21 @@ class AttendanceExporter:
             date_str = str(meeting_start)
 
         try:
-            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone()
             meeting_date = dt.strftime("%Y%m%d_%H%M")
         except:
             meeting_date = "unknown_date"
+
+        report_data = attendance_data.get("report_data", {})
+        report_start_raw = report_data.get("meetingStartDateTime", "")
+        try:
+            report_start_dt = datetime.fromisoformat(
+                str(report_start_raw).replace("Z", "+00:00")
+            ).astimezone()
+            report_start = report_start_dt.strftime("%Y%m%d_%H%M%S")
+        except:
+            if report_start_raw:
+                report_start = self._sanitize_filename(str(report_start_raw))
 
         meeting_id = attendance_data.get("meeting_id", "unknown_meeting")[:8]
         report_id = attendance_data.get("report_id", "unknown_report")[:8]
@@ -161,7 +174,9 @@ class AttendanceExporter:
             team_name=self._sanitize_filename(team_name),
             channel_name=self._sanitize_filename(channel_name),
             meeting_date=meeting_date,
+            meeting_subject=self._sanitize_filename(meeting_subject),
             meeting_id=meeting_id,
+            report_start=report_start,
             report_id=report_id
         )
 
