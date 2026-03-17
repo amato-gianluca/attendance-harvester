@@ -401,11 +401,9 @@ def main():
 
         # Step 5: Discover meetings and extract attendance
         logger.info("\nStep 5: Discovering meetings and extracting attendance")
-        checkpoint_file = Path(config["cache"]["directory"]) / config["cache"]["checkpoint_file"]
-
         meeting_resolver = MeetingResolver(
             graph_client=graph_client,
-            checkpoint_file=str(checkpoint_file)
+            json_output_dir=config["output"].get("json_directory") or str(Path(config["output"]["directory"]) / "json")
         )
 
         lookback_days = config["meetings"].get("lookback_days", 30)

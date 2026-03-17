@@ -8,7 +8,7 @@ A Python tool to automatically scan Microsoft Teams, filter teams by name, disco
 - 🔍 **Team Filtering**: Filter teams using regular expressions
 - 📅 **Meeting Discovery**: Automatically discovers Teams meetings from your calendar
 - 📊 **Attendance Export**: Downloads attendance reports and exports to CSV and/or JSON
-- 💾 **Checkpoint System**: Avoids reprocessing already-downloaded attendance data
+- 💾 **JSON-Based Reprocessing Guard**: Avoids reprocessing reports already exported as JSON
 - 🔄 **Retry Logic**: Handles API throttling and transient errors automatically
 - ⚙️ **Configurable**: YAML-based configuration for all settings
 
@@ -308,7 +308,7 @@ camafi/
 │   ├── team_filter.py           # Team filtering logic
 │   ├── meeting_resolver.py      # Meeting discovery & attendance extraction
 │   └── exporter.py              # CSV/JSON export logic
-├── cache/                       # Token cache & checkpoints (not in git)
+├── cache/                       # Token and metadata cache (not in git)
 └── output/                      # Attendance log files (not in git)
 ```
 
@@ -320,7 +320,7 @@ camafi/
 1. **You are not the meeting organizer**: Attendance reports are only available to meeting organizers
 2. **No meetings in time range**: Adjust `lookback_days` in config
 3. **Attendance not yet generated**: Reports are created after meetings end
-4. **Already processed**: Use `--clear-cache` or delete `cache/processed_meetings.json`
+4. **Already processed**: delete the corresponding JSON report from the output directory to force reprocessing
 
 **Solution**: Ensure you organize the meetings, or run the script with the organizer's account.
 

@@ -90,7 +90,7 @@ output:
 
 # Cache Settings
 cache:
-  # Directory for token cache and processing checkpoints
+  # Directory for token cache and metadata cache
   directory: "./cache"
 
   # Token cache filename
@@ -98,9 +98,6 @@ cache:
 
   # Team/channel metadata cache filename
   metadata_cache: "teams_channels.json"
-
-  # Checkpoint file to avoid re-processing
-  checkpoint_file: "processed_meetings.json"
 
 # API Settings
 api:

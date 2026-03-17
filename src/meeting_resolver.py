@@ -1,7 +1,6 @@
 """
 Meeting discovery and attendance extraction logic.
 """
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,43 +14,47 @@ logger = logging.getLogger(__name__)
 class MeetingResolver:
     """Discovers meetings and extracts attendance reports."""
 
-    def __init__(self, graph_client: GraphClient, checkpoint_file: str | None = None):
+    def __init__(self, graph_client: GraphClient, json_output_dir: str | None = None):
         """
         Initialize meeting resolver.
 
         Args:
             graph_client: Graph API client instance
-            checkpoint_file: Path to checkpoint file for tracking processed meetings
+            json_output_dir: Base JSON output directory used to detect already exported reports
         """
         self.client = graph_client
-        self.checkpoint_file = Path(checkpoint_file) if checkpoint_file else None
-        self.processed_meetings = self._load_checkpoints()
+        self.json_output_dir = Path(json_output_dir) if json_output_dir else None
+        self.processed_reports = self._load_processed_reports()
 
-    def _load_checkpoints(self) -> set[str]:
-        """Load processed meeting IDs from checkpoint file."""
-        if not self.checkpoint_file or not self.checkpoint_file.exists():
+    def _load_processed_reports(self) -> set[str]:
+        """Load processed report IDs from existing JSON exports."""
+        if not self.json_output_dir or not self.json_output_dir.exists():
             return set()
 
-        try:
-            with open(self.checkpoint_file, "r") as f:
-                data = json.load(f)
-                return set(data.get("processed_meetings", []))
-        except Exception as e:
-            logger.warning(f"Failed to load checkpoints: {e}")
-            return set()
+        processed_reports: set[str] = set()
 
-    def _save_checkpoints(self):
-        """Save processed meeting IDs to checkpoint file."""
-        if not self.checkpoint_file:
-            return
+        for json_file in self.json_output_dir.rglob("*.json"):
+            try:
+                import json
+                with open(json_file, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            except Exception as e:
+                logger.warning("Failed to inspect JSON export %s: %s", json_file, e)
+                continue
 
-        try:
-            self.checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.checkpoint_file, "w") as f:
-                json.dump({"processed_meetings": list(self.processed_meetings)}, f, indent=2)
-            logger.debug(f"Saved {len(self.processed_meetings)} processed meetings to checkpoint")
-        except Exception as e:
-            logger.warning(f"Failed to save checkpoints: {e}")
+            if not isinstance(payload, dict):
+                continue
+
+            report_id = payload.get("report_id")
+            if isinstance(report_id, str) and report_id:
+                processed_reports.add(report_id)
+
+        logger.info(
+            "Loaded %d processed report IDs from JSON exports in %s",
+            len(processed_reports),
+            self.json_output_dir
+        )
+        return processed_reports
 
     def get_meetings_in_date_range(self, lookback_days: int, lookahead_days: int = 0) -> list[dict]:
         """
@@ -209,10 +212,6 @@ class MeetingResolver:
 
         return dt
 
-    def _report_checkpoint_key(self, report_id: str) -> str:
-        """Build checkpoint key for a report."""
-        return f"report:{report_id}"
-
     def _get_context_key(self, online_meeting: dict, matched_contexts: list[dict]) -> str:
         """Return a stable grouping key for a channel-scoped meeting."""
         if matched_contexts:
@@ -347,7 +346,7 @@ class MeetingResolver:
         Args:
             online_meeting: Representative online meeting object used to query Graph
             meeting_candidates: Meetings in the same channel eligible for report mapping
-            skip_processed: Skip reports already processed (from checkpoint)
+            skip_processed: Skip reports already present in JSON output
 
         Returns:
             list of dictionaries with report and records data
@@ -377,8 +376,7 @@ class MeetingResolver:
             if not report_id:
                 continue
 
-            checkpoint_key = self._report_checkpoint_key(report_id)
-            if skip_processed and checkpoint_key in self.processed_meetings:
+            if skip_processed and report_id in self.processed_reports:
                 logger.debug(f"Skipping already processed report: {report_id}")
                 continue
 
@@ -410,10 +408,7 @@ class MeetingResolver:
                 mapped_meeting_info.get("subject", mapped_meeting_id)
             )
 
-            self.processed_meetings.add(checkpoint_key)
-
-        if attendance_data:
-            self._save_checkpoints()
+            self.processed_reports.add(report_id)
 
         return attendance_data
 
