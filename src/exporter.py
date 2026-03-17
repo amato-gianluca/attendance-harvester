@@ -67,8 +67,9 @@ class AttendanceExporter:
         logger.info("Loaded %d team directory mappings from %s", len(mapping), path)
         return mapping
 
-    def _build_csv_filepath(self, attendance_data: dict, filename: str) -> Path:
-        """Build CSV output path, routing by team-specific directory when configured."""
+    def _build_team_scoped_filepath(self, attendance_data: dict, filename: str,
+                                    base_dir: Path, extension: str) -> Path:
+        """Build output path, routing by team-specific directory when configured."""
         team_id = ""
         teams_context = attendance_data.get("teams_context", [])
         if teams_context:
@@ -76,14 +77,18 @@ class AttendanceExporter:
 
         directory_name = self.team_directories.get(team_id)
         if directory_name:
-            csv_dir = self.csv_output_dir / directory_name
-            csv_dir.mkdir(parents=True, exist_ok=True)
-            return csv_dir / f"{filename}.csv"
+            output_dir = base_dir / directory_name
+            output_dir.mkdir(parents=True, exist_ok=True)
+            return output_dir / f"{filename}.{extension}"
 
         if team_id and self.team_directories:
-            logger.warning("No CSV directory mapping found for team %s; using default CSV directory", team_id)
+            logger.warning(
+                "No %s directory mapping found for team %s; using default output directory",
+                extension.upper(),
+                team_id
+            )
 
-        return self.csv_output_dir / f"{filename}.csv"
+        return base_dir / f"{filename}.{extension}"
 
     @staticmethod
     def _sanitize_filename(name: str) -> str:
@@ -176,7 +181,12 @@ class AttendanceExporter:
         if not filename:
             filename = self._build_filename(attendance_data)
 
-        filepath = self.json_output_dir / f"{filename}.json"
+        filepath = self._build_team_scoped_filepath(
+            attendance_data=attendance_data,
+            filename=filename,
+            base_dir=self.json_output_dir,
+            extension="json"
+        )
 
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(attendance_data, f, indent=2, ensure_ascii=False)
@@ -214,7 +224,12 @@ class AttendanceExporter:
             )
             return None
 
-        filepath = self._build_csv_filepath(attendance_data, filename)
+        filepath = self._build_team_scoped_filepath(
+            attendance_data=attendance_data,
+            filename=filename,
+            base_dir=self.csv_output_dir,
+            extension="csv"
+        )
 
         with open(filepath, "w") as file:
             participant_count = attendance_data["report_data"]["totalParticipantCount"]
