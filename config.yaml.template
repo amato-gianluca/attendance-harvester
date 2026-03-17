@@ -92,6 +92,9 @@ cache:
   # Token cache filename
   token_cache: "token_cache.bin"
 
+  # Team/channel metadata cache filename
+  metadata_cache: "teams_channels.json"
+
   # Checkpoint file to avoid re-processing
   checkpoint_file: "processed_meetings.json"
 

@@ -307,9 +307,15 @@ def main():
             max_retries=config["api"]["max_retries"],
             retry_backoff_factor=config["api"]["retry_backoff_factor"],
             timeout=config["api"]["timeout"],
-            user_id=target_user_id if auth_mode == "confidential" else None
+            user_id=target_user_id if auth_mode == "confidential" else None,
+            metadata_cache_file=str(
+                Path(config["cache"]["directory"]) / config["cache"].get("metadata_cache", "teams_channels.json")
+            )
         )
         logger.info("✓ Graph API client initialized")
+
+        if args.clear_cache:
+            graph_client.clear_metadata_cache()
 
         # Step 3: Get and filter teams
         logger.info("\nStep 3: Fetching and filtering teams")
@@ -342,7 +348,10 @@ def main():
 
         if not filtered_teams:
             logger.warning("No teams matched the filter criteria. Exiting.")
+            graph_client.sync_filtered_teams_cache([])
             return
+
+        graph_client.sync_filtered_teams_cache(filtered_teams)
 
         logger.info(f"✓ Found {len(filtered_teams)} matching teams")
         for team in filtered_teams:
@@ -361,6 +370,9 @@ def main():
                         team.get("id", "")
                     )
                     continue
+
+                owners = graph_client.get_team_owners(team["id"])
+                logger.info(f"  • {team['displayName']}: {len(owners)} owners cached")
 
                 if config["meetings"].get("general_channel_only", True):
                     general_channel = graph_client.get_team_primary_channel(team["id"])
