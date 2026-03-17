@@ -20,7 +20,8 @@ class AttendanceExporter:
         filename_pattern: str | None = None,
         csv_output_dir: str | None = None,
         json_output_dir: str | None = None,
-        min_csv_report_duration_seconds: int = 0
+        min_csv_report_duration_seconds: int = 0,
+        team_directories_file: str | None = None
     ):
         """
         Initialize exporter.
@@ -32,6 +33,7 @@ class AttendanceExporter:
             json_output_dir: Directory for JSON exports
             min_csv_report_duration_seconds: Minimum report duration in seconds
                 required before exporting a CSV
+            team_directories_file: CSV file mapping team IDs to CSV subdirectories
         """
         base_output_dir = Path(output_dir)
         self.csv_output_dir = Path(csv_output_dir) if csv_output_dir else base_output_dir / "csv"
@@ -40,6 +42,48 @@ class AttendanceExporter:
         self.json_output_dir.mkdir(parents=True, exist_ok=True)
         self.filename_pattern = filename_pattern or "{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance"
         self.min_csv_report_duration_seconds = max(0, int(min_csv_report_duration_seconds))
+        self.team_directories = self._load_team_directories(team_directories_file)
+
+    @staticmethod
+    def _load_team_directories(team_directories_file: str | None) -> dict[str, str]:
+        """Load team-id to directory mappings from CSV."""
+        if not team_directories_file:
+            return {}
+
+        path = Path(team_directories_file)
+        if not path.exists():
+            logger.warning("Team directories file not found: %s", path)
+            return {}
+
+        mapping: dict[str, str] = {}
+        with open(path, newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                team_id = (row.get("team_id") or "").strip()
+                directory = (row.get("directory") or "").strip()
+                if team_id and directory:
+                    mapping[team_id] = directory
+
+        logger.info("Loaded %d team directory mappings from %s", len(mapping), path)
+        return mapping
+
+    def _build_csv_filepath(self, attendance_data: dict, filename: str) -> Path:
+        """Build CSV output path, routing by team-specific directory when configured."""
+        team_id = ""
+        teams_context = attendance_data.get("teams_context", [])
+        if teams_context:
+            team_id = str(teams_context[0].get("team", {}).get("id", "")).strip()
+
+        directory_name = self.team_directories.get(team_id)
+        if directory_name:
+            csv_dir = self.csv_output_dir / directory_name
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            return csv_dir / f"{filename}.csv"
+
+        if team_id and self.team_directories:
+            logger.warning("No CSV directory mapping found for team %s; using default CSV directory", team_id)
+
+        return self.csv_output_dir / f"{filename}.csv"
 
     @staticmethod
     def _sanitize_filename(name: str) -> str:
@@ -170,7 +214,7 @@ class AttendanceExporter:
             )
             return None
 
-        filepath = self.csv_output_dir / f"{filename}.csv"
+        filepath = self._build_csv_filepath(attendance_data, filename)
 
         with open(filepath, "w") as file:
             participant_count = attendance_data["report_data"]["totalParticipantCount"]

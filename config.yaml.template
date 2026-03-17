@@ -73,6 +73,9 @@ output:
   csv_directory: "./output/csv"
   json_directory: "./output/json"
 
+  # CSV file mapping team IDs to per-team subdirectories under csv_directory
+  team_directories_file: "./team_dirs.csv"
+
   # Save format: "both", "csv", "json"
   format: "both"
 

@@ -116,7 +116,8 @@ def build_exporter(config: dict) -> AttendanceExporter:
         filename_pattern=output_config["filename_pattern"],
         csv_output_dir=csv_output_dir,
         json_output_dir=json_output_dir,
-        min_csv_report_duration_seconds=output_config.get("min_csv_report_duration_seconds", 0)
+        min_csv_report_duration_seconds=output_config.get("min_csv_report_duration_seconds", 0),
+        team_directories_file=output_config.get("team_directories_file", "team_dirs.csv")
     )
 
 
