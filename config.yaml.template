@@ -88,6 +88,36 @@ output:
   # Default: {team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance
   filename_pattern: "{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance"
 
+  # Optional SharePoint upload for CSV exports only.
+  # Files are uploaded after local CSV export, preserving the same team-based
+  # subdirectory structure under folder_path.
+  sharepoint_csv:
+    enabled: true
+
+    # Identify the target document library either by IDs or by site path + drive name.
+    site_id: ""
+    site_hostname: "universitachieti-my.sharepoint.com"
+    site_path: "personal/luciano_caroprese_unich_it"
+    drive_id: ""
+    drive_name: "Documents"
+    folder_path: Presenze"
+
+    # Authentication for SharePoint upload can be different from harvesting auth.
+    # inherit: reuse the main auth mode/client settings
+    # public: separate device-code login, useful when the SharePoint writer is a different user
+    # confidential: separate app-only client-credentials flow
+    auth_mode: "confidential"
+    client_id: ""
+    client_secret: ""
+    authority: ""
+    cache_filename: "sharepoint_token_cache.bin"
+
+    # Used only when auth_mode resolves to public.
+    # Typical delegated permissions: Files.ReadWrite.All and Sites.ReadWrite.All
+    scopes:
+      - "Files.ReadWrite.All"
+      - "Sites.ReadWrite.All"
+
 # Cache Settings
 cache:
   # Directory for token cache and metadata cache

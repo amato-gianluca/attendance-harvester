@@ -357,4 +357,3 @@ class AttendanceExporter:
         if identity["tenantId"] != team_id:
             return name + " (Esterno)"
         return name
-        return name

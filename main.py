@@ -8,6 +8,7 @@ downloads attendance logs, and exports to CSV/JSON.
 import argparse
 import json
 import logging
+import os
 import sys
 from typing import Any
 from pathlib import Path
@@ -121,6 +122,95 @@ def build_exporter(config: dict) -> AttendanceExporter:
     )
 
 
+def build_sharepoint_csv_uploader(config: dict, clear_cache: bool = False):
+    """Build optional SharePoint uploader for CSV exports."""
+    sharepoint_config = config.get("output", {}).get("sharepoint_csv", {})
+    if not sharepoint_config.get("enabled", False):
+        return None
+
+    from src.auth import Authenticator
+    from src.graph_client import GraphClient
+    from src.sharepoint_csv_uploader import SharePointCSVUploader
+
+    auth_mode = str(sharepoint_config.get("auth_mode", "inherit")).strip().lower()
+    if auth_mode == "inherit":
+        auth_mode = config.get("auth", {}).get("mode", "public").strip().lower()
+
+    if auth_mode not in {"public", "confidential"}:
+        raise ValueError("output.sharepoint_csv.auth_mode must be inherit, public, or confidential")
+
+    client_id = sharepoint_config.get("client_id") or config["azure"]["client_id"]
+    authority = sharepoint_config.get("authority") or config["azure"]["authority"]
+    client_secret = sharepoint_config.get("client_secret")
+    if not client_secret:
+        client_secret = config.get("azure", {}).get("client_secret") or os.getenv("TEAMS_HARVESTER_CLIENT_SECRET")
+
+    if auth_mode == "confidential":
+        scopes = ["https://graph.microsoft.com/.default"]
+    else:
+        scopes = sharepoint_config.get("scopes") or ["Files.ReadWrite.All", "Sites.ReadWrite.All"]
+
+    authenticator = Authenticator(
+        client_id=client_id,
+        authority=authority,
+        scopes=scopes,
+        cache_dir=config["cache"]["directory"],
+        cache_filename=sharepoint_config.get("cache_filename", "sharepoint_token_cache.bin"),
+        auth_mode=auth_mode,
+        client_secret=client_secret
+    )
+
+    if clear_cache:
+        authenticator.clear_cache()
+
+    access_token = authenticator.acquire_token()
+    graph_client = GraphClient(
+        access_token=access_token,
+        max_retries=config["api"]["max_retries"],
+        retry_backoff_factor=config["api"]["retry_backoff_factor"],
+        timeout=config["api"]["timeout"]
+    )
+
+    return SharePointCSVUploader(
+        graph_client=graph_client,
+        site_id=sharepoint_config.get("site_id"),
+        site_hostname=sharepoint_config.get("site_hostname"),
+        site_path=sharepoint_config.get("site_path"),
+        drive_id=sharepoint_config.get("drive_id"),
+        drive_name=sharepoint_config.get("drive_name"),
+        folder_path=sharepoint_config.get("folder_path")
+    )
+
+
+def upload_csv_exports_to_sharepoint(uploader, exporter: AttendanceExporter, created_files: list[Path]) -> list[str]:
+    """Upload newly created CSV exports to SharePoint if configured."""
+    if not uploader:
+        return []
+
+    csv_files = [Path(path) for path in created_files if Path(path).suffix.lower() == ".csv"]
+    if not csv_files:
+        return []
+
+    return uploader.upload_files(csv_files, exporter.csv_output_dir)
+
+
+def upload_existing_csv_exports_to_sharepoint(config: dict, clear_cache: bool = False) -> list[str]:
+    """Upload existing local CSV exports to SharePoint and return uploaded URLs."""
+    exporter = build_exporter(config)
+    uploader = build_sharepoint_csv_uploader(config, clear_cache=clear_cache)
+    if not uploader:
+        raise ValueError("SharePoint CSV upload is not enabled in output.sharepoint_csv")
+
+    csv_root = exporter.csv_output_dir
+    csv_files = sorted(csv_root.rglob("*.csv"))
+    if not csv_files:
+        logger = logging.getLogger(__name__)
+        logger.warning("No CSV files found in %s", csv_root)
+        return []
+
+    return uploader.upload_files(csv_files, csv_root)
+
+
 def main():
     """Main execution function."""
     parser = argparse.ArgumentParser(
@@ -172,6 +262,11 @@ def main():
         type=int,
         help="Only export CSV for reports whose meeting duration is at least this many seconds; JSON export is unaffected"
     )
+    parser.add_argument(
+        "--upload-csv-to-sharepoint",
+        action="store_true",
+        help="Upload existing local CSV exports to SharePoint and exit"
+    )
 
     args = parser.parse_args()
 
@@ -217,21 +312,48 @@ def main():
 
             logger.info("\nStep 2: Exporting attendance data")
             exporter = build_exporter(config)
+            sharepoint_csv_uploader = build_sharepoint_csv_uploader(config, clear_cache=args.clear_cache)
 
             export_format = "csv"
             created_files = exporter.export_batch(attendance_data, format=export_format)
+            uploaded_files = upload_csv_exports_to_sharepoint(
+                sharepoint_csv_uploader,
+                exporter,
+                created_files
+            )
 
             csv_output_dir = config["output"].get("csv_directory") or str(Path(config["output"]["directory"]) / "csv")
             logger.info(f"✓ Created {len(created_files)} output files in {csv_output_dir}")
+            if uploaded_files:
+                logger.info(f"✓ Uploaded {len(uploaded_files)} CSV files to SharePoint")
 
             logger.info("\n" + "=" * 70)
             logger.info("SUMMARY")
             logger.info("=" * 70)
             logger.info(f"JSON files loaded: {len(attendance_data)}")
             logger.info(f"Files created: {len(created_files)}")
+            if uploaded_files:
+                logger.info(f"SharePoint CSV uploads: {len(uploaded_files)}")
             logger.info(f"CSV output directory: {csv_output_dir}")
             logger.info("=" * 70)
             logger.info("✓ CSV rebuild completed successfully")
+            return
+
+        if args.upload_csv_to_sharepoint:
+            logger.info("Step 1: Uploading existing local CSV exports to SharePoint")
+            uploaded_files = upload_existing_csv_exports_to_sharepoint(
+                config,
+                clear_cache=args.clear_cache
+            )
+
+            csv_output_dir = config["output"].get("csv_directory") or str(Path(config["output"]["directory"]) / "csv")
+            logger.info("\n" + "=" * 70)
+            logger.info("SUMMARY")
+            logger.info("=" * 70)
+            logger.info(f"CSV output directory: {csv_output_dir}")
+            logger.info(f"SharePoint CSV uploads: {len(uploaded_files)}")
+            logger.info("=" * 70)
+            logger.info("✓ CSV SharePoint upload completed successfully")
             return
 
         from src.auth import Authenticator, AuthenticationError
@@ -428,11 +550,21 @@ def main():
         exporter = build_exporter(config)
 
         export_format = config["output"]["format"]
+        sharepoint_csv_uploader = None
+        if export_format in ("csv", "both"):
+            sharepoint_csv_uploader = build_sharepoint_csv_uploader(config, clear_cache=args.clear_cache)
         created_files = exporter.export_batch(attendance_data, format=export_format)
+        uploaded_files = upload_csv_exports_to_sharepoint(
+            sharepoint_csv_uploader,
+            exporter,
+            created_files
+        )
 
         csv_output_dir = config["output"].get("csv_directory") or str(Path(config["output"]["directory"]) / "csv")
         json_output_dir = config["output"].get("json_directory") or str(Path(config["output"]["directory"]) / "json")
         logger.info(f"✓ Created {len(created_files)} output files")
+        if uploaded_files:
+            logger.info(f"✓ Uploaded {len(uploaded_files)} CSV files to SharePoint")
 
         # Summary
         logger.info("\n" + "=" * 70)
@@ -441,6 +573,8 @@ def main():
         logger.info(f"Teams scanned: {len(filtered_teams)}")
         logger.info(f"Attendance reports extracted: {len(attendance_data)}")
         logger.info(f"Files created: {len(created_files)}")
+        if uploaded_files:
+            logger.info(f"SharePoint CSV uploads: {len(uploaded_files)}")
         if export_format in ("csv", "both"):
             logger.info(f"CSV output directory: {csv_output_dir}")
         if export_format in ("json", "both"):
