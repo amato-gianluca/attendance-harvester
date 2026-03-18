@@ -370,7 +370,7 @@ Create a batch file and schedule it via Task Scheduler GUI.
 
 To organize outputs by date, modify the `filename_pattern` in config.
 Available variables are `team_name`, `channel_name`, `meeting_date`,
-`meeting_subject`, `meeting_id`, `report_start`, and `report_id`:
+`meeting_short_date`, `meeting_subject`, `meeting_id`, `report_start`, and `report_id`:
 
 ```yaml
 output:
