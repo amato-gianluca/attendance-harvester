@@ -1,6 +1,7 @@
 """
 Meeting discovery and attendance extraction logic.
 """
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -275,6 +276,24 @@ class MeetingResolver:
 
         return min(meeting_candidates, key=distance)
 
+    @staticmethod
+    def _filter_candidates_for_source_meetings(source_meeting_ids: set[str],
+                                               meeting_candidates: list[dict]) -> list[dict]:
+        """
+        Restrict report mapping to meetings that actually returned the report.
+
+        A report can only be mapped to meeting candidates whose meeting_id is in
+        the set of meetings that returned that report. Time-based matching is
+        then applied within that restricted subset.
+        """
+        if not source_meeting_ids:
+            return []
+
+        return [
+            candidate for candidate in meeting_candidates
+            if candidate.get("meeting_id") in source_meeting_ids
+        ]
+
     def _match_event_contexts(self, event: dict, online_meeting: dict,
                               teams_with_channels: list[dict]) -> list[dict]:
         """
@@ -337,75 +356,115 @@ class MeetingResolver:
 
         return deduped
 
-    def get_meeting_attendance(self, online_meeting: dict,
+    def get_channel_attendance(self, online_meetings: list[dict],
                                meeting_candidates: list[dict] | None = None,
                                skip_processed: bool = True) -> list[dict]:
         """
-        Get attendance reports for a meeting or channel and map them to meetings.
+        Get attendance reports for all meetings in a channel and map them to meetings.
 
         Args:
-            online_meeting: Representative online meeting object used to query Graph
+            online_meetings: Online meeting objects in the same channel context
             meeting_candidates: Meetings in the same channel eligible for report mapping
             skip_processed: Skip reports already present in JSON output
 
         Returns:
             list of dictionaries with report and records data
         """
-        meeting_id = online_meeting.get("id")
-        if not meeting_id:
-            logger.warning("Meeting has no ID, skipping")
-            return []
-
-        # Get attendance reports
-        reports = self.client.get_attendance_reports(meeting_id)
-
-        if not reports:
-            logger.info(
-                f"No attendance reports for meeting: {online_meeting.get('_event', {}).get('subject', meeting_id)}")
+        if not online_meetings:
+            logger.warning("Channel has no resolvable meeting IDs, skipping")
             return []
 
         candidates = meeting_candidates or [{
-            "meeting_id": meeting_id,
-            "meeting_info": online_meeting.get("_event", {}),
+            "meeting_id": meeting.get("id", ""),
+            "meeting_info": meeting.get("_event", {}),
             "teams_context": []
-        }]
+        } for meeting in online_meetings if meeting.get("id")]
 
         attendance_data = []
-        for report in reports:
-            report_id = report.get("id")
-            if not report_id:
+        reports_by_id: dict[str, dict] = {}
+        report_source_meeting_ids: dict[str, set[str]] = {}
+        report_source_online_meetings: dict[str, dict] = {}
+
+        for online_meeting in online_meetings:
+            meeting_id = online_meeting.get("id")
+            if not meeting_id:
                 continue
+
+            reports = self.client.get_attendance_reports(meeting_id)
+            if not reports:
+                logger.info(
+                    "No attendance reports for meeting: %s",
+                    online_meeting.get("_event", {}).get("subject", meeting_id)
+                )
+                continue
+
+            for report in reports:
+                report_id = report.get("id")
+                if not report_id:
+                    continue
+
+                reports_by_id.setdefault(report_id, report)
+                report_source_meeting_ids.setdefault(report_id, set()).add(meeting_id)
+                report_source_online_meetings.setdefault(report_id, online_meeting)
+
+        for report_id, report in reports_by_id.items():
+            source_meeting_ids = report_source_meeting_ids.get(report_id, set())
 
             if skip_processed and report_id in self.processed_reports:
                 logger.debug(f"Skipping already processed report: {report_id}")
                 continue
 
-            best_meeting = self._select_best_meeting_for_report(report, candidates)
+            eligible_candidates = self._filter_candidates_for_source_meetings(
+                source_meeting_ids,
+                candidates
+            )
+            best_meeting = self._select_best_meeting_for_report(report, eligible_candidates)
             if not best_meeting:
-                logger.debug(f"Could not map report {report_id} to a meeting")
+                logger.debug(
+                    "Could not map report %s to a meeting returned by source meetings %s",
+                    report_id,
+                    sorted(source_meeting_ids)
+                )
                 continue
 
-            # Get attendance records for this report
-            records = self.client.get_attendance_records(meeting_id, report_id)
+            mapped_meeting_id = best_meeting.get("meeting_id", "")
+            record_source_meeting_id = (
+                mapped_meeting_id if mapped_meeting_id in source_meeting_ids
+                else next(iter(source_meeting_ids), "")
+            )
+            if not record_source_meeting_id:
+                logger.debug(
+                    "Could not determine source meeting id for attendance record fetch: %s",
+                    report_id
+                )
+                continue
 
-            mapped_meeting_id = best_meeting.get("meeting_id", meeting_id)
-            mapped_meeting_info = best_meeting.get("meeting_info", online_meeting.get("_event", {}))
+            # Get attendance records for this report from one meeting that returned it.
+            records = self.client.get_attendance_records(record_source_meeting_id, report_id)
+
+            source_online_meeting = report_source_online_meetings.get(report_id, {})
+            mapped_meeting_info = best_meeting.get(
+                "meeting_info",
+                source_online_meeting.get("_event", {})
+            )
 
             attendance_data.append({
-                "meeting_id": mapped_meeting_id,
+                "meeting_id": mapped_meeting_id or record_source_meeting_id,
                 "meeting_info": mapped_meeting_info,
                 "report_id": report_id,
                 "report_data": report,
                 "attendance_records": records,
                 "teams_context": best_meeting.get("teams_context", []),
-                "source_meeting_id": meeting_id
+                "source_meeting_id": record_source_meeting_id
             })
 
             logger.info(
-                "Extracted %d attendance records from report %s mapped to '%s'",
+                "Extracted %d attendance records from report %s mapped to '%s' "
+                "(returned by %d meeting(s))",
                 len(records),
                 report_id,
-                mapped_meeting_info.get("subject", mapped_meeting_id)
+                mapped_meeting_info.get("subject", mapped_meeting_id or record_source_meeting_id),
+                len(source_meeting_ids)
             )
 
             self.processed_reports.add(report_id)
@@ -459,12 +518,14 @@ class MeetingResolver:
 
             context_key = self._get_context_key(online_meeting, matched_contexts)
             group = meetings_by_context.setdefault(context_key, {
-                "online_meeting": online_meeting if online_meeting.get("id") else None,
+                "online_meetings": [],
+                "online_meeting_ids": set(),
                 "meetings": []
             })
 
-            if not group["online_meeting"] and online_meeting.get("id"):
-                group["online_meeting"] = online_meeting
+            if online_meeting.get("id") and online_meeting["id"] not in group["online_meeting_ids"]:
+                group["online_meetings"].append(online_meeting)
+                group["online_meeting_ids"].add(online_meeting["id"])
 
             group["meetings"].append({
                 "meeting_id": online_meeting.get("id", online_meeting.get("_calendar_event_id", "")),
@@ -473,22 +534,23 @@ class MeetingResolver:
             })
 
         for context_key, group in meetings_by_context.items():
-            representative_meeting = group.get("online_meeting")
-            if not representative_meeting:
+            online_meetings = group.get("online_meetings", [])
+            if not online_meetings:
                 logger.debug(
-                    "Skipping context %s because no resolvable meeting ID is available",
+                    "Skipping context %s because no resolvable meeting IDs are available",
                     context_key
                 )
                 continue
 
             logger.info("")
             logger.info(
-                "Processing channel attendance for %s using %d candidate meetings",
+                "Processing channel attendance for %s using %d candidate meetings and %d queryable meetings",
                 context_key,
-                len(group["meetings"])
+                len(group["meetings"]),
+                len(online_meetings)
             )
-            attendance_list = self.get_meeting_attendance(
-                representative_meeting,
+            attendance_list = self.get_channel_attendance(
+                online_meetings,
                 meeting_candidates=group["meetings"]
             )
             all_attendance.extend(attendance_list)
