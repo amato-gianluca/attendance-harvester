@@ -122,10 +122,11 @@ def build_exporter(config: dict) -> AttendanceExporter:
     )
 
 
-def build_sharepoint_csv_uploader(config: dict, clear_cache: bool = False):
+def build_sharepoint_csv_uploader(config: dict, clear_cache: bool = False, force_enable: bool = False):
     """Build optional SharePoint uploader for CSV exports."""
     sharepoint_config = config.get("output", {}).get("sharepoint_csv", {})
-    if not sharepoint_config.get("enabled", False):
+    auto_upload_enabled = sharepoint_config.get("auto_upload", False)
+    if not force_enable and not auto_upload_enabled:
         return None
 
     from src.auth import Authenticator
@@ -197,9 +198,9 @@ def upload_csv_exports_to_sharepoint(uploader, exporter: AttendanceExporter, cre
 def upload_existing_csv_exports_to_sharepoint(config: dict, clear_cache: bool = False) -> list[str]:
     """Upload existing local CSV exports to SharePoint and return uploaded URLs."""
     exporter = build_exporter(config)
-    uploader = build_sharepoint_csv_uploader(config, clear_cache=clear_cache)
+    uploader = build_sharepoint_csv_uploader(config, clear_cache=clear_cache, force_enable=True)
     if not uploader:
-        raise ValueError("SharePoint CSV upload is not enabled in output.sharepoint_csv")
+        raise ValueError("SharePoint CSV upload could not be initialized from output.sharepoint_csv")
 
     csv_root = exporter.csv_output_dir
     csv_files = sorted(csv_root.rglob("*.csv"))

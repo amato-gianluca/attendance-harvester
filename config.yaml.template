@@ -92,7 +92,7 @@ output:
   # Files are uploaded after local CSV export, preserving the same team-based
   # subdirectory structure under folder_path.
   sharepoint_csv:
-    enabled: true
+    auto_upload: true
 
     # Identify the target document library either by IDs or by site path + drive name.
     site_id: ""
