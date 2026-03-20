@@ -152,7 +152,7 @@ class AttendanceExporter:
         try:
             dt = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone()
             meeting_date = dt.strftime("%Y%m%d_%H%M")
-            meeting_short_date = dt.strftime("%-d-%m-%y")
+            meeting_short_date = dt.strftime("%-m-%d-%y")
         except:
             meeting_date = "unknown_date"
             meeting_short_date = "unknown_date"
@@ -352,11 +352,11 @@ class AttendanceExporter:
         name = identity["displayName"]
         id = identity["id"]
         if id.startswith("guest:"):
-            return name + " (Non verificato)"
+            return name + " (Unverified)"
         if not re.match(r'^[0-9a-f-]+$', identity["id"]):
             return name
         if identity["tenantId"] is None:
-            return name + " (Non verificato)"
+            return name + " (Unverified)"
         if identity["tenantId"] != team_id:
-            return name + " (Esterno)"
+            return name + " (External)"
         return name
