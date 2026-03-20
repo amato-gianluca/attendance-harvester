@@ -158,7 +158,7 @@ class GraphClient:
             "channels_by_id": {},
         })
 
-    def _user_path(self, relative_path: str) -> str:
+    def _user_path(self, relative_path: str, user_id_override: str | None = None) -> str:
         """
         Build a user-scoped Graph endpoint.
 
@@ -166,8 +166,9 @@ class GraphClient:
         In confidential mode (user_id provided), this returns /users/{user_id}/{relative_path}.
         """
         normalized = relative_path.lstrip("/")
-        if self.user_id:
-            return f"/users/{self.user_id}/{normalized}"
+        effective_user_id = user_id_override if user_id_override is not None else self.user_id
+        if effective_user_id:
+            return f"/users/{effective_user_id}/{normalized}"
         return f"/me/{normalized}"
 
     def _make_request(self, method: str, url: str, **kwargs) -> requests.Response:
@@ -441,7 +442,8 @@ class GraphClient:
 
         return primary_channel
 
-    def get_calendar_events(self, start_datetime: str, end_datetime: str) -> list[dict]:
+    def get_calendar_events(self, start_datetime: str, end_datetime: str,
+                            user_id_override: str | None = None) -> list[dict]:
         """
         Get calendar events in a time range.
 
@@ -459,7 +461,7 @@ class GraphClient:
             "endDateTime": end_datetime,
             "$select": "id,subject,start,end,isOnlineMeeting,onlineMeetingProvider,onlineMeeting,organizer,location,locations,bodyPreview"
         }
-        events = self._paginate(self._user_path("calendarView"), params=params)
+        events = self._paginate(self._user_path("calendarView", user_id_override=user_id_override), params=params)
 
         # Filter to Teams meetings only
         teams_events = [e for e in events
@@ -470,7 +472,8 @@ class GraphClient:
             f"Found {len(teams_events)} Teams meetings out of {len(events)} total events")
         return teams_events
 
-    def get_online_meeting_by_join_url(self, join_url: str) -> dict | None:
+    def get_online_meeting_by_join_url(self, join_url: str,
+                                       user_id_override: str | None = None) -> dict | None:
         """
         Get online meeting details by join URL.
 
@@ -483,7 +486,7 @@ class GraphClient:
         filter_param = f"JoinWebUrl eq '{join_url}'"
         try:
             meetings = self._paginate(self._user_path(
-                "onlineMeetings"), params={"$filter": filter_param})
+                "onlineMeetings", user_id_override=user_id_override), params={"$filter": filter_param})
             if meetings:
                 return meetings[0]
             logger.debug(
@@ -493,7 +496,8 @@ class GraphClient:
             logger.debug(f"Could not retrieve online meeting by join URL: {e}")
             return None
 
-    def get_attendance_reports(self, meeting_id: str) -> list[dict]:
+    def get_attendance_reports(self, meeting_id: str,
+                               user_id_override: str | None = None) -> list[dict]:
         """
         Get all attendance reports for an online meeting.
 
@@ -506,7 +510,8 @@ class GraphClient:
         logger.debug(f"Fetching attendance reports for meeting {meeting_id}")
         try:
             reports = self._paginate(self._user_path(
-                f"onlineMeetings/{meeting_id}/attendanceReports"))
+                f"onlineMeetings/{meeting_id}/attendanceReports",
+                user_id_override=user_id_override))
             if reports:
                 logger.debug(
                     f"Found {len(reports)} attendance reports for meeting {meeting_id}")
@@ -521,7 +526,8 @@ class GraphClient:
                 f"Failed to fetch attendance reports for meeting {meeting_id}: {e}")
             return []
 
-    def get_attendance_records(self, meeting_id: str, report_id: str) -> list[dict]:
+    def get_attendance_records(self, meeting_id: str, report_id: str,
+                               user_id_override: str | None = None) -> list[dict]:
         """
         Get attendance records for a specific report.
 
@@ -536,7 +542,8 @@ class GraphClient:
         try:
             records = self._paginate(
                 self._user_path(
-                    f"onlineMeetings/{meeting_id}/attendanceReports/{report_id}/attendanceRecords")
+                    f"onlineMeetings/{meeting_id}/attendanceReports/{report_id}/attendanceRecords",
+                    user_id_override=user_id_override)
             )
             logger.debug(
                 f"Found {len(records)} attendance records for report {report_id}")

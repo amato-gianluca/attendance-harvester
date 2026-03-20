@@ -57,6 +57,38 @@ class MeetingResolver:
         )
         return processed_reports
 
+    def _get_owner_fallback_user_ids(self, matched_contexts: list[dict]) -> list[str]:
+        """Return distinct owner IDs usable as fallback acting users."""
+        current_user_id = self.client.user_id
+        fallback_user_ids: list[str] = []
+        seen = set()
+
+        for context in matched_contexts:
+            team_id = context.get("team", {}).get("id")
+            if not team_id:
+                continue
+
+            owners = self.client.get_team_owners(team_id)
+            for owner in owners:
+                owner_id = owner.get("id")
+                if not owner_id or owner_id == current_user_id or owner_id in seen:
+                    continue
+                seen.add(owner_id)
+                fallback_user_ids.append(owner_id)
+
+        return fallback_user_ids
+
+    @staticmethod
+    def _attach_event_metadata(online_meeting: dict, event: dict) -> dict:
+        """Attach calendar event metadata to a resolved online meeting payload."""
+        online_meeting["_event"] = {
+            "subject": event.get("subject"),
+            "start": event.get("start"),
+            "end": event.get("end"),
+            "organizer": event.get("organizer")
+        }
+        return online_meeting
+
     def get_meetings_in_date_range(self, lookback_days: int, lookahead_days: int = 0) -> list[dict]:
         """
         Get all Teams meetings in the specified date range.
@@ -84,7 +116,8 @@ class MeetingResolver:
         )
         return self.client.get_calendar_events(start_str, end_str)
 
-    def resolve_online_meeting(self, event: dict) -> dict | None:
+    def resolve_online_meeting(self, event: dict,
+                               fallback_user_ids: list[str] | None = None) -> tuple[dict | None, str | None]:
         """
         Resolve calendar event to online meeting object.
 
@@ -104,20 +137,26 @@ class MeetingResolver:
         if not join_url:
             logger.debug(
                 f"No join URL for event: {event.get('subject', 'Unknown')}")
-            return None
+            return None, None
 
         # Try to get online meeting by join URL (works for organized meetings)
         online_meeting = self.client.get_online_meeting_by_join_url(join_url)
 
         if online_meeting:
-            # Enrich with event details
-            online_meeting["_event"] = {
-                "subject": event.get("subject"),
-                "start": event.get("start"),
-                "end": event.get("end"),
-                "organizer": event.get("organizer")
-            }
-            return online_meeting
+            return self._attach_event_metadata(online_meeting, event), self.client.user_id
+
+        for fallback_user_id in fallback_user_ids or []:
+            online_meeting = self.client.get_online_meeting_by_join_url(
+                join_url,
+                user_id_override=fallback_user_id
+            )
+            if online_meeting:
+                logger.info(
+                    "Resolved online meeting for '%s' using team owner fallback user %s",
+                    event.get("subject", "Unknown"),
+                    fallback_user_id
+                )
+                return self._attach_event_metadata(online_meeting, event), fallback_user_id
 
         # Fallback: create minimal meeting object from calendar event
         # This allows attendance extraction to be attempted (will get 404 if not organized by user)
@@ -146,7 +185,7 @@ class MeetingResolver:
         if "id" in event:
             minimal_meeting["_calendar_event_id"] = event["id"]
 
-        return minimal_meeting
+        return minimal_meeting, None
 
     def _extract_join_url(self, event: dict, online_meeting: dict | None = None) -> str:
         """Extract join URL from event or resolved online meeting."""
@@ -384,13 +423,18 @@ class MeetingResolver:
         reports_by_id: dict[str, dict] = {}
         report_source_meeting_ids: dict[str, set[str]] = {}
         report_source_online_meetings: dict[str, dict] = {}
+        report_source_user_ids: dict[str, str | None] = {}
 
         for online_meeting in online_meetings:
             meeting_id = online_meeting.get("id")
             if not meeting_id:
                 continue
 
-            reports = self.client.get_attendance_reports(meeting_id)
+            acting_user_id = online_meeting.get("_resolved_user_id")
+            reports = self.client.get_attendance_reports(
+                meeting_id,
+                user_id_override=acting_user_id
+            )
             if not reports:
                 logger.info(
                     "No attendance reports for meeting: %s",
@@ -406,6 +450,7 @@ class MeetingResolver:
                 reports_by_id.setdefault(report_id, report)
                 report_source_meeting_ids.setdefault(report_id, set()).add(meeting_id)
                 report_source_online_meetings.setdefault(report_id, online_meeting)
+                report_source_user_ids.setdefault(report_id, acting_user_id)
 
         for report_id, report in reports_by_id.items():
             source_meeting_ids = report_source_meeting_ids.get(report_id, set())
@@ -440,9 +485,16 @@ class MeetingResolver:
                 continue
 
             # Get attendance records for this report from one meeting that returned it.
-            records = self.client.get_attendance_records(record_source_meeting_id, report_id)
-
             source_online_meeting = report_source_online_meetings.get(report_id, {})
+            report_user_id = report_source_user_ids.get(
+                report_id,
+                source_online_meeting.get("_resolved_user_id")
+            )
+            records = self.client.get_attendance_records(
+                record_source_meeting_id,
+                report_id,
+                user_id_override=report_user_id
+            )
             mapped_meeting_info = best_meeting.get(
                 "meeting_info",
                 source_online_meeting.get("_event", {})
@@ -497,6 +549,7 @@ class MeetingResolver:
         all_attendance = []
         matched_events = 0
         meetings_by_context: dict[str, dict] = {}
+        fallback_user_ids = self._get_owner_fallback_user_ids(teams_with_channels)
 
         # Process each meeting
         for event in all_events:
@@ -504,9 +557,14 @@ class MeetingResolver:
             logger.info(f"Processing meeting: {event_subject}")
 
             # Resolve to online meeting
-            online_meeting = self.resolve_online_meeting(event)
+            online_meeting, resolved_user_id = self.resolve_online_meeting(
+                event,
+                fallback_user_ids=fallback_user_ids
+            )
             if not online_meeting:
                 continue
+
+            online_meeting["_resolved_user_id"] = resolved_user_id
 
             matched_contexts = self._match_event_contexts(
                 event, online_meeting, teams_with_channels)
