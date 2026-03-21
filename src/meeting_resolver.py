@@ -199,38 +199,52 @@ class MeetingResolver:
         return ""
 
     def _extract_thread_id_from_join_url(self, join_url: str) -> str:
-        """Try to extract channel thread ID from Teams join URL context query parameter."""
+        """
+        Extract the best channel/thread identifier from a Teams join URL.
+
+        For channel meetings the channel id commonly appears in the path and ends
+        with ``@thread.tacv2``. The ``context`` query parameter may also contain a
+        thread id, but that value is not consistently the channel id, so it is
+        only used as a fallback.
+        """
         if not join_url:
             return ""
 
         try:
             parsed = urlparse(join_url)
+            path_parts = [unquote(part) for part in parsed.path.split("/") if part]
+            for part in path_parts:
+                if "@thread.tacv2" in part or "@thread.v2" in part or "@thread.skype" in part:
+                    return part
+
             query = parse_qs(parsed.query)
             context_values = query.get("context")
-            if not context_values:
-                return ""
-
-            raw_context = context_values[0]
-            # Query value may be URL encoded JSON.
-            decoded_context = unquote(raw_context)
-            context_obj = json.loads(decoded_context)
-
-            thread_id = context_obj.get("ThreadId") or context_obj.get("threadId")
-            return thread_id if isinstance(thread_id, str) else ""
+            if context_values:
+                raw_context = context_values[0]
+                decoded_context = unquote(raw_context)
+                context_obj = json.loads(decoded_context)
+                thread_id = context_obj.get("ThreadId") or context_obj.get("threadId")
+                if isinstance(thread_id, str):
+                    return thread_id
         except Exception:
-            return ""
+            pass
 
-    def _build_event_haystack(self, event: dict, online_meeting: dict | None) -> str:
-        """Build normalized text blob used for fuzzy team/channel matching."""
-        parts = [
-            event.get("subject", ""),
-            event.get("bodyPreview", ""),
-            event.get("location", {}).get("displayName", ""),
-            " ".join(loc.get("displayName", "")
-                     for loc in event.get("locations", [])),
-            self._extract_join_url(event, online_meeting),
-        ]
-        return " ".join(p for p in parts if isinstance(p, str)).lower()
+        return ""
+
+    @staticmethod
+    def _dedupe_contexts(contexts: list[dict]) -> list[dict]:
+        """De-duplicate contexts by team+channel pair."""
+        deduped: list[dict] = []
+        seen = set()
+        for context in contexts:
+            team_id = context.get("team", {}).get("id", "")
+            channel_id = context.get("channel", {}).get("id", "")
+            key = f"{team_id}:{channel_id}"
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(context)
+        return deduped
 
     @staticmethod
     def _parse_datetime(value: dict | str | None) -> datetime | None:
@@ -333,67 +347,27 @@ class MeetingResolver:
             if candidate.get("meeting_id") in source_meeting_ids
         ]
 
-    def _match_event_contexts(self, event: dict, online_meeting: dict,
-                              teams_with_channels: list[dict]) -> list[dict]:
+    def _match_event_contexts_from_join_url(self, event: dict,
+                                            teams_with_channels: list[dict]) -> list[dict]:
         """
-        Return matching team/channel contexts for the meeting.
-
-        Matching strategy (best effort):
-        1) Exact channel thread id match from meeting/chat or join URL context.
-        2) Team/channel display name fuzzy match in event metadata.
+        Match a calendar event to team/channel contexts using the join URL thread ID.
         """
         if not teams_with_channels:
             return []
 
-        meeting_thread_id = online_meeting.get(
-            "chatInfo", {}).get("threadId", "")
-        join_url = self._extract_join_url(event, online_meeting)
+        join_url = self._extract_join_url(event)
         url_thread_id = self._extract_thread_id_from_join_url(join_url)
-        haystack = self._build_event_haystack(event, online_meeting)
+        if not url_thread_id:
+            return []
 
         matched: list[dict] = []
-
         for context in teams_with_channels:
-            team = context.get("team", {})
             channel = context.get("channel", {})
-
-            team_id = str(team.get("id", ""))
-            team_name = str(team.get("displayName", "")).lower()
             channel_id = str(channel.get("id", ""))
-            channel_name = str(channel.get("displayName", "")).lower()
-
-            id_match = bool(channel_id) and (
-                channel_id == meeting_thread_id or channel_id == url_thread_id
-            )
-
-            name_match = bool(team_name and channel_name) and (
-                team_name in haystack and channel_name in haystack
-            )
-
-            # Team-only fallback (useful when channel metadata is absent)
-            team_only_match = bool(team_name) and team_name in haystack
-
-            # URL fallback for identifiers
-            identifier_in_url = bool(join_url) and (
-                (channel_id and channel_id in join_url) or
-                (team_id and team_id in join_url)
-            )
-
-            if id_match or name_match or (team_only_match and identifier_in_url):
+            if channel_id and channel_id == url_thread_id:
                 matched.append(context)
 
-        # De-duplicate matches by team+channel id pair
-        deduped: list[dict] = []
-        seen = set()
-        for context in matched:
-            team_id = context.get("team", {}).get("id", "")
-            channel_id = context.get("channel", {}).get("id", "")
-            key = f"{team_id}:{channel_id}"
-            if key not in seen:
-                seen.add(key)
-                deduped.append(context)
-
-        return deduped
+        return self._dedupe_contexts(matched)
 
     def get_channel_attendance(self, online_meetings: list[dict],
                                meeting_candidates: list[dict] | None = None,
@@ -549,14 +523,26 @@ class MeetingResolver:
         all_attendance = []
         matched_events = 0
         meetings_by_context: dict[str, dict] = {}
-        fallback_user_ids = self._get_owner_fallback_user_ids(teams_with_channels)
-
         # Process each meeting
         for event in all_events:
             event_subject = event.get("subject", "Unknown")
             logger.info(f"Processing meeting: {event_subject}")
 
-            # Resolve to online meeting
+            matched_contexts = self._match_event_contexts_from_join_url(
+                event,
+                teams_with_channels
+            )
+            if not matched_contexts:
+                logger.debug(
+                    "Skipping meeting with no team/channel match from join URL thread id: %s",
+                    event_subject
+                )
+                continue
+
+            fallback_user_ids = self._get_owner_fallback_user_ids(matched_contexts)
+
+            # Resolve to online meeting after the team/channel match so owner fallback
+            # is limited to the matched team(s).
             online_meeting, resolved_user_id = self.resolve_online_meeting(
                 event,
                 fallback_user_ids=fallback_user_ids
@@ -565,13 +551,6 @@ class MeetingResolver:
                 continue
 
             online_meeting["_resolved_user_id"] = resolved_user_id
-
-            matched_contexts = self._match_event_contexts(
-                event, online_meeting, teams_with_channels)
-            if not matched_contexts:
-                logger.debug(f"Skipping meeting outside filtered teams/channels: {event_subject}")
-                continue
-
             matched_events += 1
 
             context_key = self._get_context_key(online_meeting, matched_contexts)

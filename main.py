@@ -495,9 +495,6 @@ def main():
                     )
                     continue
 
-                owners = graph_client.get_team_owners(team["id"])
-                logger.info(f"  • {team['displayName']}: {len(owners)} owners cached")
-
                 if config["meetings"].get("general_channel_only", True):
                     general_channel = graph_client.get_team_primary_channel(team["id"])
                     if general_channel:
