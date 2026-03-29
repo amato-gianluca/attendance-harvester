@@ -62,7 +62,7 @@ def load_config(config_path: str) -> dict:
     with open(config_file, "r") as f:
         config = yaml.safe_load(f)
 
-    return config
+    return config or {}
 
 
 def load_attendance_from_json_inputs(json_inputs: list[str]) -> list[dict]:
@@ -136,35 +136,60 @@ def get_csv_output_dir(config: dict) -> Path:
     return Path(output_config["directory"]) / "csv"
 
 
-def build_sharepoint_csv_uploader(config: dict, clear_cache: bool = False, force_enable: bool = False):
-    """Build optional SharePoint uploader for CSV exports."""
-    sharepoint_config = config.get("output", {}).get("sharepoint_csv", {})
-    auto_upload_enabled = sharepoint_config.get("auto_upload", False)
-    if not force_enable and not auto_upload_enabled:
-        return None
+def acquire_access_token_from_config(
+    config: dict,
+    auth_overrides: dict | None,
+    log_details: bool = False
+) -> tuple[str, str]:
+    """Resolve auth settings from config, build an authenticator, and acquire an access token."""
+    logger = logging.getLogger(__name__)
 
-    auth_mode = str(sharepoint_config.get("auth_mode", "inherit")).strip().lower()
-    if auth_mode == "inherit":
-        auth_mode = config.get("auth", {}).get("mode", "public").strip().lower()
+    auth_overrides = auth_overrides or {}
+    base_auth_config = config.get("auth", {})
 
+    auth_mode = str(auth_overrides.get("mode") or base_auth_config.get("mode", "public")).strip().lower()
     if auth_mode not in {"public", "confidential"}:
-        raise ValueError("output.sharepoint_csv.auth_mode must be inherit, public, or confidential")
+        raise ValueError("auth.mode must be either 'public' or 'confidential'")
 
-    client_id = sharepoint_config.get("client_id") or config["azure"]["client_id"]
-    authority = sharepoint_config.get("authority") or config["azure"]["authority"]
-    client_secret = sharepoint_config.get("client_secret")
+    client_id = auth_overrides.get("client_id") or base_auth_config.get("client_id")
+    authority = auth_overrides.get("authority") or base_auth_config.get("authority")
+    if not client_id:
+        raise ValueError("auth.client_id is required")
+    if not authority:
+        raise ValueError("auth.authority is required")
+
+    client_secret = auth_overrides.get("client_secret")
     if not client_secret:
-        client_secret = config.get("azure", {}).get("client_secret") or os.getenv("TEAMS_HARVESTER_CLIENT_SECRET")
+        client_secret = base_auth_config.get("client_secret") or os.getenv("TEAMS_HARVESTER_CLIENT_SECRET")
 
     if auth_mode == "confidential":
         scopes = ["https://graph.microsoft.com/.default"]
     else:
-        scopes = sharepoint_config.get("scopes") or ["Files.ReadWrite.All", "Sites.ReadWrite.All"]
+        scopes = auth_overrides.get("scopes") or base_auth_config.get("scopes", [])
+
+    if log_details:
+        well_known_clients = {
+            "14d82eec-204b-4c2f-b7e8-296a70dab67e": "Microsoft Graph PowerShell",
+            "04b07795-8ddb-461a-bbee-02f9e1bf7b46": "Azure CLI",
+            "d3590ed6-52b3-4102-aeff-aad2292ab01c": "Microsoft Office"
+        }
+
+        if auth_mode == "confidential":
+            logger.info("Using confidential client credentials mode")
+            logger.info("Using custom Azure AD application with app-only token")
+        elif client_id in well_known_clients:
+            logger.info("Using public device code mode")
+            logger.info(f"Using {well_known_clients[client_id]} public client (no Azure app needed)")
+            logger.info("You'll authenticate with your Microsoft credentials in the browser")
+        else:
+            logger.info("Using public device code mode")
+            logger.info("Using custom Azure AD application")
 
     cache = config.get("cache", {})
     cache_dir_path = Path(cache.get("directory", "./cache"))
     cache_dir_path.mkdir(parents=True, exist_ok=True)
-    cache_filename = sharepoint_config.get("cache_filename", "sharepoint_token_cache.bin")
+    cache_filename = auth_overrides.get("cache_filename") or base_auth_config.get("token_cache", "token_cache.bin")
+
     authenticator = Authenticator(
         client_id=client_id,
         authority=authority,
@@ -174,10 +199,30 @@ def build_sharepoint_csv_uploader(config: dict, clear_cache: bool = False, force
         client_secret=client_secret
     )
 
-    if clear_cache:
+    if auth_overrides.get("clear_cache"):
+        logger.info("Clearing token cache as requested")
         authenticator.clear_cache()
 
-    access_token = authenticator.acquire_token()
+    return authenticator.acquire_token(), auth_mode
+
+
+def build_sharepoint_csv_uploader(config: dict, clear_cache: bool = False, force_enable: bool = False):
+    """Build optional SharePoint uploader for CSV exports."""
+    sharepoint_config = config.get("output", {}).get("sharepoint_csv", {})
+    sharepoint_auth = sharepoint_config.get("auth", {})
+    auto_upload_enabled = sharepoint_config.get("auto_upload", False)
+    if not force_enable and not auto_upload_enabled:
+        return None
+
+    access_token, _ = acquire_access_token_from_config(
+        config=config,
+        auth_overrides={
+            **sharepoint_auth,
+            "scopes": sharepoint_auth.get("scopes") or ["Files.ReadWrite.All", "Sites.ReadWrite.All"],
+            "cache_filename": sharepoint_auth.get("cache_filename", "sharepoint_token_cache.bin"),
+            "clear_cache": clear_cache,
+        }
+    )
     graph_client = GraphClient(
         access_token=access_token,
         max_retries=config["api"]["max_retries"],
@@ -321,23 +366,19 @@ def run_upload_csv_to_sharepoint(args: argparse.Namespace, config: dict) -> None
     """Upload existing local CSV exports to SharePoint."""
     logger = logging.getLogger(__name__)
 
-    logger.info("Step 1: Uploading existing local CSV exports to SharePoint")
     uploader = build_sharepoint_csv_uploader(config, clear_cache=args.clear_cache, force_enable=True)
     if not uploader:
         raise ValueError("SharePoint CSV upload could not be initialized from output.sharepoint_csv")
 
     csv_root = get_csv_output_dir(config)
     csv_files = sorted(csv_root.rglob("*.csv"))
-    if not csv_files:
-        logger.warning("No CSV files found in %s", csv_root)
-        uploaded_files = []
-    else:
-        uploaded_files = uploader.upload_files(csv_files, csv_root)
+    uploaded_files = uploader.upload_files(csv_files, csv_root)
 
     logger.info("=" * 70)
     logger.info("SUMMARY")
     logger.info("=" * 70)
     logger.info(f"CSV output directory: {csv_root}")
+    logger.info(f"CSV files: {len(csv_files)}")
     logger.info(f"SharePoint CSV uploads: {len(uploaded_files)}")
     logger.info("=" * 70)
     logger.info("✓ CSV SharePoint upload completed successfully")
@@ -349,56 +390,11 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
 
     # Step 1: Authenticate
     logger.info("Step 1: Authenticating with Microsoft Graph API")
-
-    auth_mode = config.get("auth", {}).get("mode", "public").strip().lower()
-    if auth_mode not in {"public", "confidential"}:
-        raise ValueError("auth.mode must be either 'public' or 'confidential'")
-
-    client_id = config["azure"]["client_id"]
-    client_secret = config.get("azure", {}).get("client_secret")
-    if not client_secret:
-        client_secret = os.getenv("TEAMS_HARVESTER_CLIENT_SECRET")
-
-    if auth_mode == "confidential":
-        logger.info("Using confidential client credentials mode")
-        scopes_for_auth = ["https://graph.microsoft.com/.default"]
-    else:
-        logger.info("Using public device code mode")
-        scopes_for_auth = config["scopes"]
-
-    well_known_clients = {
-        "14d82eec-204b-4c2f-b7e8-296a70dab67e": "Microsoft Graph PowerShell",
-        "04b07795-8ddb-461a-bbee-02f9e1bf7b46": "Azure CLI",
-        "d3590ed6-52b3-4102-aeff-aad2292ab01c": "Microsoft Office"
-    }
-
-    if auth_mode == "public" and client_id in well_known_clients:
-        logger.info(f"Using {well_known_clients[client_id]} public client (no Azure app needed)")
-        logger.info("You'll authenticate with your Microsoft credentials in the browser")
-    elif auth_mode == "public":
-        logger.info("Using custom Azure AD application")
-    else:
-        logger.info("Using custom Azure AD application with app-only token")
-
-    cache = config.get("cache", {})
-    cache_dir_path = Path(cache.get("directory", "./cache"))
-    cache_dir_path.mkdir(parents=True, exist_ok=True)
-    cache_filename = cache.get("cache_filename", "token_cache.bin")
-
-    authenticator = Authenticator(
-        client_id=client_id,
-        authority=config["azure"]["authority"],
-        scopes=scopes_for_auth,
-        cache_path=cache_dir_path / cache_filename,
-        auth_mode=auth_mode,
-        client_secret=client_secret
+    access_token, auth_mode = acquire_access_token_from_config(
+        config=config,
+        auth_overrides={"clear_cache": args.clear_cache},
+        log_details=True
     )
-
-    if args.clear_cache:
-        logger.info("Clearing token cache as requested")
-        authenticator.clear_cache()
-
-    access_token = authenticator.acquire_token()
     logger.info("✓ Authentication successful")
 
     # Step 2: Initialize Graph client

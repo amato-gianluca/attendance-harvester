@@ -1,8 +1,8 @@
 # Microsoft Teams Attendance Harvester Configuration
 # Copy this file to config.yaml and fill in your values
 
-# Azure AD Application Settings
-azure:
+# Authorization settings for harvesting attendance reports
+auth:
   # Option 1: Use Microsoft's well-known public client (NO AZURE APP NEEDED!)
   # This uses Microsoft Graph PowerShell's client ID - just login with your credentials
   client_id: "14d82eec-204b-4c2f-b7e8-296a70dab67e"  # Microsoft Graph PowerShell (default)
@@ -16,19 +16,17 @@ azure:
   # client_secret: "YOUR_CLIENT_SECRET_HERE"  # Required only for auth.mode=confidential
 
   # Tenant ID - use "common" to work with any Microsoft account, or your specific tenant ID
-  tenant_id: "common"  # or "YOUR_TENANT_ID_HERE" for single tenant
+  tenant_id: "common"                                    # or "YOUR_TENANT_ID_HERE" for single tenant
   authority: "https://login.microsoftonline.com/common"  # or replace 'common' with your tenant_id
 
-# Microsoft Graph API Scopes (delegated permissions)
-scopes:
-  - "Team.ReadBasic.All"
-  - "Channel.ReadBasic.All"
-  - "Calendars.Read"
-  - "OnlineMeetings.Read"
-  - "OnlineMeetingArtifact.Read.All"
+  # Microsoft Graph API Scopes (delegated permissions)
+  scopes:
+    - "Team.ReadBasic.All"
+    - "Channel.ReadBasic.All"
+    - "Calendars.Read"
+    - "OnlineMeetings.Read"
+    - "OnlineMeetingArtifact.Read.All"
 
-# Authentication mode settings
-auth:
   # public: delegated auth with browser device code (default)
   # confidential: app-only client credentials (requires azure.client_secret and admin-consented application permissions)
   mode: "public"
@@ -37,6 +35,10 @@ auth:
   # Used for user-scoped Graph endpoints /users/{target_user_id}/...
   # Can be user principal name (e.g. user@contoso.com) or object ID.
   target_user_id: ""
+
+  # Token cache filename
+  token_cache: "token_cache.bin"
+
 
 # Team Filtering
 team_filter:
@@ -100,31 +102,29 @@ output:
     site_path: "personal/luciano_caroprese_unich_it"
     drive_id: ""
     drive_name: "Documents"
-    folder_path: Presenze"
+    folder_path: "Presenze"
 
     # Authentication for SharePoint upload can be different from harvesting auth.
-    # inherit: reuse the main auth mode/client settings
+    # If auth.mode is omitted, the main auth.mode is reused automatically.
     # public: separate device-code login, useful when the SharePoint writer is a different user
     # confidential: separate app-only client-credentials flow
-    auth_mode: "confidential"
-    client_id: ""
-    client_secret: ""
-    authority: ""
-    cache_filename: "sharepoint_token_cache.bin"
+    auth:
+      mode: "confidential"
+      client_id: ""
+      client_secret: ""
+      authority: ""
+      cache_filename: "sharepoint_token_cache.bin"
 
-    # Used only when auth_mode resolves to public.
-    # Typical delegated permissions: Files.ReadWrite.All and Sites.ReadWrite.All
-    scopes:
-      - "Files.ReadWrite.All"
-      - "Sites.ReadWrite.All"
+      # Used only when the effective auth mode resolves to public.
+      # Typical delegated permissions: Files.ReadWrite.All and Sites.ReadWrite.All
+      scopes:
+        - "Files.ReadWrite.All"
+        - "Sites.ReadWrite.All"
 
 # Cache Settings
 cache:
   # Directory for token cache and metadata cache
   directory: "./cache"
-
-  # Token cache filename
-  token_cache: "token_cache.bin"
 
   # Team/channel metadata cache filename
   metadata_cache: "teams_channels.json"
