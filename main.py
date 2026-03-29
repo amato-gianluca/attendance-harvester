@@ -105,6 +105,7 @@ def build_exporter(config: AppConfig) -> AttendanceExporter:
         filename_pattern=output_config.filename_pattern,
         csv_output_dir=str(output_config.csv_directory),
         json_output_dir=str(output_config.json_directory),
+        include_tags=output_config.tags,
         min_csv_report_duration_seconds=output_config.min_csv_report_duration_seconds,
         team_directories_file=output_config.team_directories_file
     )

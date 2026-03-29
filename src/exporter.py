@@ -20,6 +20,7 @@ class AttendanceExporter:
         filename_pattern: str | None = None,
         csv_output_dir: str | None = None,
         json_output_dir: str | None = None,
+        include_tags: bool = True,
         min_csv_report_duration_seconds: int = 0,
         team_directories_file: str | None = None
     ):
@@ -31,6 +32,7 @@ class AttendanceExporter:
             filename_pattern: Pattern for output filenames
             csv_output_dir: Directory for CSV exports
             json_output_dir: Directory for JSON exports
+            include_tags: Whether to keep attendance status tags in displayed names
             min_csv_report_duration_seconds: Minimum report duration in seconds
                 required before exporting a CSV
             team_directories_file: CSV file mapping team IDs to CSV subdirectories
@@ -41,7 +43,8 @@ class AttendanceExporter:
         self.csv_output_dir.mkdir(parents=True, exist_ok=True)
         self.json_output_dir.mkdir(parents=True, exist_ok=True)
         self.filename_pattern = filename_pattern or "{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance"
-        self.min_csv_report_duration_seconds = max(0, int(min_csv_report_duration_seconds))
+        self.include_tags = include_tags
+        self.min_csv_report_duration_seconds = max(0, min_csv_report_duration_seconds)
         self.team_directories = self._load_team_directories(team_directories_file)
 
     @staticmethod
@@ -347,9 +350,10 @@ class AttendanceExporter:
             formatted.append(f"{seconds}s")
         return " ".join(formatted)
 
-    @staticmethod
-    def _format_displayname(identity: dict, team_id: str):
+    def _format_displayname(self, identity: dict, team_id: str):
         name = identity["displayName"]
+        if not self.include_tags:
+            return name
         id = identity["id"]
         if id.startswith("guest:"):
             return name + " (Unverified)"

@@ -251,6 +251,7 @@ class OutputConfig:
     json_directory: Path
     team_directories_file: str | None
     format: str
+    tags: bool
     min_csv_report_duration_seconds: int
     filename_pattern: str
     sharepoint_csv: SharePointCSVConfig
@@ -285,6 +286,7 @@ class OutputConfig:
             json_directory=Path(json_directory_raw) if json_directory_raw else directory / "json",
             team_directories_file=_optional_string(raw.get("team_directories_file")).strip() or None,
             format=export_format,
+            tags=_require_bool(raw.get("tags", True), "output.tags"),
             min_csv_report_duration_seconds=min_csv_report_duration_seconds,
             filename_pattern=_require_non_empty_string(
                 raw.get("filename_pattern", "{team_name}_{channel_name}_{meeting_date}_{meeting_id}_{report_id}_attendance"),

@@ -81,6 +81,9 @@ output:
   # Save format: "both", "csv", "json"
   format: "both"
 
+  # Whether to keep participant tags like "(Unverified)" or "(External)" in CSV names
+  tags: true
+
   # Only export CSV when the report duration is at least this many seconds.
   # JSON export is never filtered by this setting.
   min_csv_report_duration_seconds: 0
