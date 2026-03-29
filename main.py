@@ -16,6 +16,7 @@ from uuid import UUID
 
 import yaml
 
+from src.app_config import AppConfig, AuthConfig, load_app_config
 from src.auth import AuthenticationError, Authenticator
 from src.exporter import AttendanceExporter
 from src.graph_client import GraphAPIError, GraphClient
@@ -48,21 +49,6 @@ def setup_logging(verbose: bool = False):
     # Reduce noise from libraries
     logging.getLogger("msal").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file."""
-    config_file = Path(config_path)
-
-    if not config_file.exists():
-        print(f"Error: Configuration file not found: {config_path}")
-        print("Please copy config.yaml.template to config.yaml and fill in your settings.")
-        sys.exit(1)
-
-    with open(config_file, "r") as f:
-        config = yaml.safe_load(f)
-
-    return config or {}
 
 
 def load_attendance_from_json_inputs(json_inputs: list[str]) -> list[dict]:
@@ -110,62 +96,32 @@ def load_attendance_from_json_inputs(json_inputs: list[str]) -> list[dict]:
     return attendance_data
 
 
-def build_exporter(config: dict) -> AttendanceExporter:
+def build_exporter(config: AppConfig) -> AttendanceExporter:
     """Build exporter with per-format output directories."""
-    output_config = config["output"]
-    output_dir = output_config["directory"]
-    csv_output_dir = output_config.get("csv_directory")
-    json_output_dir = output_config.get("json_directory")
+    output_config = config.output
 
     return AttendanceExporter(
-        output_dir=output_dir,
-        filename_pattern=output_config["filename_pattern"],
-        csv_output_dir=csv_output_dir,
-        json_output_dir=json_output_dir,
-        min_csv_report_duration_seconds=output_config.get("min_csv_report_duration_seconds", 0),
-        team_directories_file=output_config.get("team_directories_file", "team_dirs.csv")
+        output_dir=str(output_config.directory),
+        filename_pattern=output_config.filename_pattern,
+        csv_output_dir=str(output_config.csv_directory),
+        json_output_dir=str(output_config.json_directory),
+        min_csv_report_duration_seconds=output_config.min_csv_report_duration_seconds,
+        team_directories_file=output_config.team_directories_file
     )
 
 
-def get_csv_output_dir(config: dict) -> Path:
+def get_csv_output_dir(config: AppConfig) -> Path:
     """Resolve the CSV output directory from config."""
-    output_config = config["output"]
-    csv_output_dir = output_config.get("csv_directory")
-    if csv_output_dir:
-        return Path(csv_output_dir)
-    return Path(output_config["directory"]) / "csv"
+    return config.output.csv_directory
 
 
 def acquire_access_token_from_config(
-    config: dict,
-    auth_overrides: dict | None,
+    config: AppConfig,
+    auth_config: AuthConfig,
     log_details: bool = False
 ) -> tuple[str, str]:
     """Resolve auth settings from config, build an authenticator, and acquire an access token."""
     logger = logging.getLogger(__name__)
-
-    auth_overrides = auth_overrides or {}
-    base_auth_config = config.get("auth", {})
-
-    auth_mode = str(auth_overrides.get("mode") or base_auth_config.get("mode", "public")).strip().lower()
-    if auth_mode not in {"public", "confidential"}:
-        raise ValueError("auth.mode must be either 'public' or 'confidential'")
-
-    client_id = auth_overrides.get("client_id") or base_auth_config.get("client_id")
-    authority = auth_overrides.get("authority") or base_auth_config.get("authority")
-    if not client_id:
-        raise ValueError("auth.client_id is required")
-    if not authority:
-        raise ValueError("auth.authority is required")
-
-    client_secret = auth_overrides.get("client_secret")
-    if not client_secret:
-        client_secret = base_auth_config.get("client_secret") or os.getenv("TEAMS_HARVESTER_CLIENT_SECRET")
-
-    if auth_mode == "confidential":
-        scopes = ["https://graph.microsoft.com/.default"]
-    else:
-        scopes = auth_overrides.get("scopes") or base_auth_config.get("scopes", [])
 
     if log_details:
         well_known_clients = {
@@ -174,70 +130,62 @@ def acquire_access_token_from_config(
             "d3590ed6-52b3-4102-aeff-aad2292ab01c": "Microsoft Office"
         }
 
-        if auth_mode == "confidential":
+        if auth_config.mode == "confidential":
             logger.info("Using confidential client credentials mode")
             logger.info("Using custom Azure AD application with app-only token")
-        elif client_id in well_known_clients:
+        elif auth_config.client_id in well_known_clients:
             logger.info("Using public device code mode")
-            logger.info(f"Using {well_known_clients[client_id]} public client (no Azure app needed)")
+            logger.info(f"Using {well_known_clients[auth_config.client_id]} public client (no Azure app needed)")
             logger.info("You'll authenticate with your Microsoft credentials in the browser")
         else:
             logger.info("Using public device code mode")
             logger.info("Using custom Azure AD application")
 
-    cache = config.get("cache", {})
-    cache_dir_path = Path(cache.get("directory", "./cache"))
+    cache_dir_path = config.cache.directory
     cache_dir_path.mkdir(parents=True, exist_ok=True)
-    cache_filename = auth_overrides.get("cache_filename") or base_auth_config.get("token_cache", "token_cache.bin")
+    client_secret = auth_config.client_secret or os.getenv("TEAMS_HARVESTER_CLIENT_SECRET")
 
     authenticator = Authenticator(
-        client_id=client_id,
-        authority=authority,
-        scopes=scopes,
-        cache_path=cache_dir_path / cache_filename,
-        auth_mode=auth_mode,
+        client_id=auth_config.client_id,
+        authority=auth_config.authority,
+        scopes=auth_config.scopes,
+        cache_path=cache_dir_path / auth_config.token_cache,
+        auth_mode=auth_config.mode,
         client_secret=client_secret
     )
 
-    if auth_overrides.get("clear_cache"):
+    if auth_config.clear_cache:
         logger.info("Clearing token cache as requested")
         authenticator.clear_cache()
 
-    return authenticator.acquire_token(), auth_mode
+    return authenticator.acquire_token(), auth_config.mode
 
 
-def build_sharepoint_csv_uploader(config: dict, clear_cache: bool = False, force_enable: bool = False):
+def build_sharepoint_csv_uploader(config: AppConfig, force_enable: bool = False):
     """Build optional SharePoint uploader for CSV exports."""
-    sharepoint_config = config.get("output", {}).get("sharepoint_csv", {})
-    sharepoint_auth = sharepoint_config.get("auth", {})
-    auto_upload_enabled = sharepoint_config.get("auto_upload", False)
-    if not force_enable and not auto_upload_enabled:
+    sharepoint_config = config.output.sharepoint_csv
+    if not force_enable and not sharepoint_config.auto_upload:
         return None
 
     access_token, _ = acquire_access_token_from_config(
         config=config,
-        auth_overrides={
-            **sharepoint_auth,
-            "scopes": sharepoint_auth.get("scopes") or ["Files.ReadWrite.All", "Sites.ReadWrite.All"],
-            "cache_filename": sharepoint_auth.get("cache_filename", "sharepoint_token_cache.bin"),
-            "clear_cache": clear_cache,
-        }
+        auth_config=sharepoint_config.auth
     )
     graph_client = GraphClient(
         access_token=access_token,
-        max_retries=config["api"]["max_retries"],
-        retry_backoff_factor=config["api"]["retry_backoff_factor"],
-        timeout=config["api"]["timeout"]
+        max_retries=config.api.max_retries,
+        retry_backoff_factor=config.api.retry_backoff_factor,
+        timeout=config.api.timeout
     )
 
     return SharePointCSVUploader(
         graph_client=graph_client,
-        site_id=sharepoint_config.get("site_id"),
-        site_hostname=sharepoint_config.get("site_hostname"),
-        site_path=sharepoint_config.get("site_path"),
-        drive_id=sharepoint_config.get("drive_id"),
-        drive_name=sharepoint_config.get("drive_name"),
-        folder_path=sharepoint_config.get("folder_path")
+        site_id=sharepoint_config.site_id,
+        site_hostname=sharepoint_config.site_hostname,
+        site_path=sharepoint_config.site_path,
+        drive_id=sharepoint_config.drive_id,
+        drive_name=sharepoint_config.drive_name,
+        folder_path=sharepoint_config.folder_path
     )
 
 
@@ -313,24 +261,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def apply_cli_overrides(args: argparse.Namespace, config: dict) -> None:
-    """Apply command-line overrides to loaded config."""
-    if args.team_regex:
-        config["team_filter"]["regex"] = args.team_regex
-    if args.lookback_days is not None:
-        config["meetings"]["lookback_days"] = args.lookback_days
-    if args.lookahead_days is not None:
-        config["meetings"]["lookahead_days"] = args.lookahead_days
-    if args.min_csv_report_duration_seconds is not None:
-        config["output"]["min_csv_report_duration_seconds"] = args.min_csv_report_duration_seconds
-
-
-def run_rebuild_csv(args: argparse.Namespace, config: dict) -> None:
+def run_rebuild_csv(config: AppConfig, json_inputs: list[str]) -> None:
     """Rebuild CSV exports from existing attendance JSON payloads."""
     logger = logging.getLogger(__name__)
 
     logger.info("Step 1: Loading attendance data from existing JSON files")
-    attendance_data = load_attendance_from_json_inputs(args.rebuild_csv)
+    attendance_data = load_attendance_from_json_inputs(json_inputs)
 
     if not attendance_data:
         logger.warning("No attendance data found in the provided JSON input(s).")
@@ -340,7 +276,7 @@ def run_rebuild_csv(args: argparse.Namespace, config: dict) -> None:
 
     logger.info("Step 2: Exporting attendance data")
     exporter = build_exporter(config)
-    sharepoint_csv_uploader = build_sharepoint_csv_uploader(config, clear_cache=args.clear_cache)
+    sharepoint_csv_uploader = build_sharepoint_csv_uploader(config)
 
     export_format = "csv"
     created_files = exporter.export_batch(attendance_data, format=export_format)
@@ -362,11 +298,11 @@ def run_rebuild_csv(args: argparse.Namespace, config: dict) -> None:
     logger.info("✓ CSV rebuild completed successfully")
 
 
-def run_upload_csv_to_sharepoint(args: argparse.Namespace, config: dict) -> None:
+def run_upload_csv_to_sharepoint(config: AppConfig) -> None:
     """Upload existing local CSV exports to SharePoint."""
     logger = logging.getLogger(__name__)
 
-    uploader = build_sharepoint_csv_uploader(config, clear_cache=args.clear_cache, force_enable=True)
+    uploader = build_sharepoint_csv_uploader(config, force_enable=True)
     if not uploader:
         raise ValueError("SharePoint CSV upload could not be initialized from output.sharepoint_csv")
 
@@ -384,7 +320,7 @@ def run_upload_csv_to_sharepoint(args: argparse.Namespace, config: dict) -> None
     logger.info("✓ CSV SharePoint upload completed successfully")
 
 
-def run_harvest(args: argparse.Namespace, config: dict) -> None:
+def run_harvest(config: AppConfig) -> None:
     """Run the default Teams attendance harvesting workflow."""
     logger = logging.getLogger(__name__)
 
@@ -392,14 +328,14 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
     logger.info("Step 1: Authenticating with Microsoft Graph API")
     access_token, auth_mode = acquire_access_token_from_config(
         config=config,
-        auth_overrides={"clear_cache": args.clear_cache},
+        auth_config=config.auth,
         log_details=True
     )
     logger.info("✓ Authentication successful")
 
     # Step 2: Initialize Graph client
     logger.info("\nStep 2: Initializing Graph API client")
-    target_user_id = config.get("auth", {}).get("target_user_id")
+    target_user_id = config.auth.target_user_id
     if auth_mode == "confidential" and not target_user_id:
         raise ValueError(
             "Confidential mode requires auth.target_user_id in config (UPN or object ID), "
@@ -408,24 +344,22 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
 
     graph_client = GraphClient(
         access_token=access_token,
-        max_retries=config["api"]["max_retries"],
-        retry_backoff_factor=config["api"]["retry_backoff_factor"],
-        timeout=config["api"]["timeout"],
+        max_retries=config.api.max_retries,
+        retry_backoff_factor=config.api.retry_backoff_factor,
+        timeout=config.api.timeout,
         user_id=target_user_id if auth_mode == "confidential" else None,
-        metadata_cache_file=str(
-            Path(config["cache"]["directory"]) / config["cache"].get("metadata_cache", "teams_channels.json")
-        )
+        metadata_cache_file=str(config.cache.metadata_cache_file)
     )
     logger.info("✓ Graph API client initialized")
 
-    if args.clear_cache:
+    if config.auth.clear_cache:
         graph_client.clear_metadata_cache()
 
     # Step 3: Get and filter teams
     logger.info("\nStep 3: Fetching and filtering teams")
     teams = graph_client.get_joined_teams()
 
-    if config["meetings"].get("include_associated_teams", False):
+    if config.meetings.include_associated_teams:
         associated = graph_client.get_associated_teams()
         team_ids = {t["id"] for t in teams}
         for assoc_team in associated:
@@ -445,7 +379,7 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
                 })
                 team_ids.add(assoc_team_id)
 
-    team_filter = TeamFilter(config["team_filter"]["regex"])
+    team_filter = TeamFilter(config.team_filter.regex)
     filtered_teams = team_filter.filter_teams(teams)
 
     if not filtered_teams:
@@ -473,7 +407,7 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
                 )
                 continue
 
-            if config["meetings"].get("general_channel_only", True):
+            if config.meetings.general_channel_only:
                 general_channel = graph_client.get_team_primary_channel(team["id"])
                 if general_channel:
                     teams_with_channels.append({
@@ -501,15 +435,13 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
     logger.info("\nStep 5: Discovering meetings and extracting attendance")
     meeting_resolver = MeetingResolver(
         graph_client=graph_client,
-        json_output_dir=config["output"].get("json_directory") or str(Path(config["output"]["directory"]) / "json")
+        json_output_dir=str(config.output.json_directory)
     )
 
-    lookback_days = config["meetings"].get("lookback_days", 30)
-    lookahead_days = config["meetings"].get("lookahead_days", 0)
     attendance_data = meeting_resolver.extract_all_attendance(
         teams_with_channels=teams_with_channels,
-        lookback_days=lookback_days,
-        lookahead_days=lookahead_days
+        lookback_days=config.meetings.lookback_days,
+        lookahead_days=config.meetings.lookahead_days
     )
 
     if not attendance_data:
@@ -525,10 +457,10 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
     logger.info("\nStep 6: Exporting attendance data")
     exporter = build_exporter(config)
 
-    export_format = config["output"]["format"]
+    export_format = config.output.format
     sharepoint_csv_uploader = None
     if export_format in ("csv", "both"):
-        sharepoint_csv_uploader = build_sharepoint_csv_uploader(config, clear_cache=args.clear_cache)
+        sharepoint_csv_uploader = build_sharepoint_csv_uploader(config)
     created_files = exporter.export_batch(attendance_data, format=export_format)
     uploaded_files = upload_csv_exports_to_sharepoint(
         sharepoint_csv_uploader,
@@ -536,8 +468,6 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
         created_files
     )
 
-    csv_output_dir = config["output"].get("csv_directory") or str(Path(config["output"]["directory"]) / "csv")
-    json_output_dir = config["output"].get("json_directory") or str(Path(config["output"]["directory"]) / "json")
     logger.info(f"✓ Created {len(created_files)} output files")
     if uploaded_files:
         logger.info(f"✓ Uploaded {len(uploaded_files)} CSV files to SharePoint")
@@ -551,9 +481,9 @@ def run_harvest(args: argparse.Namespace, config: dict) -> None:
     if uploaded_files:
         logger.info(f"SharePoint CSV uploads: {len(uploaded_files)}")
     if export_format in ("csv", "both"):
-        logger.info(f"CSV output directory: {csv_output_dir}")
+        logger.info(f"CSV output directory: {config.output.csv_directory}")
     if export_format in ("json", "both"):
-        logger.info(f"JSON output directory: {json_output_dir}")
+        logger.info(f"JSON output directory: {config.output.json_directory}")
     logger.info("=" * 70)
     logger.info("✓ Attendance harvesting completed successfully")
 
@@ -571,14 +501,17 @@ def main():
     logger.info("=" * 70)
 
     try:
-        config = load_config(args.config)
-        apply_cli_overrides(args, config)
+        config = load_app_config(args.config, args)
         if args.rebuild_csv:
-            run_rebuild_csv(args, config)
+            run_rebuild_csv(config, args.rebuild_csv)
         elif args.upload_csv_to_sharepoint:
-            run_upload_csv_to_sharepoint(args, config)
+            run_upload_csv_to_sharepoint(config)
         else:
-            run_harvest(args, config)
+            run_harvest(config)
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found: {args.config}")
+        print("Please copy config.yaml.template to config.yaml and fill in your settings.")
+        sys.exit(1)
     except KeyboardInterrupt:
         logger.warning("\nOperation cancelled by user")
         sys.exit(130)
