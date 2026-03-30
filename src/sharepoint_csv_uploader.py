@@ -37,14 +37,9 @@ class SharePointCSVUploader:
             return self.site_id
 
         if not self.site_hostname or not self.site_path:
-            raise ValueError(
-                "SharePoint CSV upload requires either site_id or both site_hostname and site_path"
-            )
+            raise ValueError("SharePoint CSV upload requires either site_id or both site_hostname and site_path")
 
-        response = self.client._make_request(
-            "GET",
-            f"/sites/{self.site_hostname}:/{self.site_path}"
-        )
+        response = self.client._make_request("GET", f"/sites/{self.site_hostname}:/{self.site_path}")
         site = response.json()
         site_id = site.get("id")
         if not site_id:
@@ -68,9 +63,7 @@ class SharePointCSVUploader:
                     return drive_id
 
         available_drive_names = sorted(
-            str(drive.get("name", "")).strip()
-            for drive in drives
-            if str(drive.get("name", "")).strip()
+            str(drive.get("name", "")).strip() for drive in drives if str(drive.get("name", "")).strip()
         )
         available_fragment = ", ".join(available_drive_names) if available_drive_names else "none"
         raise GraphAPIError(
@@ -163,7 +156,8 @@ class SharePointCSVUploader:
         )
         item = response.json()
         web_url = item.get("webUrl", "")
-        logger.info("Uploaded CSV to SharePoint: %s", web_url or remote_path.as_posix())
+        logger.debug("Uploaded CSV to SharePoint: %s", web_url or remote_path.as_posix())
+
         return web_url
 
     def upload_files(self, file_paths: list[Path], local_csv_root: Path) -> list[str]:
