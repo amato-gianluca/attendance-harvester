@@ -124,6 +124,20 @@ output:
         - "Files.ReadWrite.All"
         - "Sites.ReadWrite.All"
 
+reports_email:
+  sender: "gianluca.amato@unich.it"
+  bcc_recipients: []
+  template_file: "./template_email.txt"
+  attachment_filename: "registro.xlsx"
+  sent_marker_filename: "SENT"
+  subject_template: "Registro presenze {team_name}"
+  smtp_hostname: "localhost"
+  smtp_port: 25
+  smtp_username: ""
+  smtp_password: ""
+  smtp_starttls: false
+  smtp_ssl: false
+
 # Cache Settings
 cache:
   # Directory for token cache and metadata cache

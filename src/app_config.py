@@ -301,6 +301,60 @@ class OutputConfig:
 
 
 @dataclass(frozen=True)
+class ReportsEmailConfig:
+    sender: str
+    bcc_recipients: list[str]
+    template_file: Path
+    attachment_filename: str
+    sent_marker_filename: str
+    subject_template: str
+    smtp_hostname: str
+    smtp_port: int
+    smtp_username: str
+    smtp_password: str | None
+    smtp_starttls: bool
+    smtp_ssl: bool
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: dict[str, Any],
+        *,
+        base_auth: AuthConfig,
+        clear_cache: bool,
+    ) -> "ReportsEmailConfig":
+        return cls(
+            sender=_require_non_empty_string(raw.get("sender"), "reports_email.sender"),
+            bcc_recipients=_read_scopes(raw.get("bcc_recipients"), [], "reports_email.bcc_recipients"),
+            template_file=Path(
+                _require_non_empty_string(raw.get("template_file", "./template_email.txt"), "reports_email.template_file")
+            ),
+            attachment_filename=_require_non_empty_string(
+                raw.get("attachment_filename", "registro.xlsx"),
+                "reports_email.attachment_filename",
+            ),
+            sent_marker_filename=_require_non_empty_string(
+                raw.get("sent_marker_filename", "SENT"),
+                "reports_email.sent_marker_filename",
+            ),
+            subject_template=_require_non_empty_string(
+                raw.get("subject_template", "Registro presenze {team_name}"),
+                "reports_email.subject_template",
+            ),
+            smtp_hostname=_require_non_empty_string(raw.get("smtp_hostname"), "reports_email.smtp_hostname"),
+            smtp_port=_require_positive_int(raw.get("smtp_port", 25), "reports_email.smtp_port"),
+            smtp_username=_optional_string(raw.get("smtp_username")).strip(),
+            smtp_password=(
+                _optional_string(raw.get("smtp_password")).strip() or None
+                if raw.get("smtp_password") is not None
+                else None
+            ),
+            smtp_starttls=_require_bool(raw.get("smtp_starttls", False), "reports_email.smtp_starttls"),
+            smtp_ssl=_require_bool(raw.get("smtp_ssl", False), "reports_email.smtp_ssl"),
+        )
+
+
+@dataclass(frozen=True)
 class CacheConfig:
     directory: Path
     metadata_cache: str
@@ -338,6 +392,7 @@ class AppConfig:
     team_filter: TeamFilterConfig
     meetings: MeetingsConfig
     output: OutputConfig
+    reports_email: ReportsEmailConfig
     cache: CacheConfig
     api: APIConfig
 
@@ -365,6 +420,11 @@ class AppConfig:
                 _ensure_mapping(raw.get("output"), "output"),
                 base_auth=auth,
                 min_csv_report_duration_seconds_override=args.min_csv_report_duration_seconds,
+                clear_cache=args.clear_cache,
+            ),
+            reports_email=ReportsEmailConfig.from_mapping(
+                _ensure_mapping(raw.get("reports_email"), "reports_email"),
+                base_auth=auth,
                 clear_cache=args.clear_cache,
             ),
             cache=cache,

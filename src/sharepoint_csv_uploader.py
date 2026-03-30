@@ -71,11 +71,32 @@ class SharePointCSVUploader:
             f"Available drives: {available_fragment}"
         )
 
+    def _resolve_root_folder(self) -> tuple[str, PurePosixPath]:
+        """Resolve the configured SharePoint root folder for uploads and scans."""
+        drive_id = self._resolve_drive_id()
+        root_folder = PurePosixPath(self.folder_path)
+        return drive_id, root_folder
+
     def _list_children(self, drive_id: str, parent_item_id: str) -> list[dict]:
         """List children of a drive item."""
         if parent_item_id == "root":
             return self.client._paginate(f"/drives/{drive_id}/root/children")
         return self.client._paginate(f"/drives/{drive_id}/items/{parent_item_id}/children")
+
+    def _get_item_by_path(self, drive_id: str, relative_path: PurePosixPath) -> dict | None:
+        """Return a drive item by relative path, or None when not found."""
+        normalized = relative_path.as_posix().strip("/")
+        if not normalized:
+            response = self.client._make_request("GET", f"/drives/{drive_id}/root")
+            return response.json()
+
+        response = self.client._make_request(
+            "GET",
+            f"/drives/{drive_id}/root:/{quote(normalized, safe='/')}"
+        )
+        if response.status_code == 404:
+            return None
+        return response.json()
 
     def _create_folder(self, drive_id: str, parent_item_id: str, folder_name: str) -> dict:
         """Create a folder inside the specified drive item."""
@@ -136,6 +157,70 @@ class SharePointCSVUploader:
             parent_item_id = created["id"]
 
         return parent_item_id
+
+    def find_files_by_name(self, filename: str) -> list[dict]:
+        """Recursively list files with the given name under the configured SharePoint folder."""
+        drive_id, root_folder = self._resolve_root_folder()
+        root_item = self._get_item_by_path(drive_id, root_folder)
+        if not root_item:
+            return []
+
+        matches: list[dict] = []
+        stack: list[tuple[dict, PurePosixPath]] = [(root_item, root_folder)]
+
+        while stack:
+            current_item, current_path = stack.pop()
+            if not isinstance(current_item.get("folder"), dict):
+                continue
+
+            children = self._list_children(drive_id, current_item["id"])
+            for child in children:
+                child_path = current_path / child["name"]
+                if isinstance(child.get("folder"), dict):
+                    stack.append((child, child_path))
+                    continue
+
+                if child.get("name") == filename:
+                    child_copy = dict(child)
+                    child_copy["_relative_path"] = child_path
+                    child_copy["_parent_relative_path"] = current_path
+                    matches.append(child_copy)
+
+        return matches
+
+    def folder_contains_name(self, folder_relative_path: PurePosixPath, filename: str) -> bool:
+        """Return True if the specified SharePoint folder contains a child with the given name."""
+        drive_id, _ = self._resolve_root_folder()
+        folder_item = self._get_item_by_path(drive_id, folder_relative_path)
+        if not folder_item:
+            return False
+
+        children = self._list_children(drive_id, folder_item["id"])
+        return any(child.get("name") == filename for child in children)
+
+    def download_file_content(self, relative_path: PurePosixPath) -> bytes:
+        """Download a SharePoint file by path."""
+        drive_id, _ = self._resolve_root_folder()
+        normalized = relative_path.as_posix().strip("/")
+        response = self.client._make_request(
+            "GET",
+            f"/drives/{drive_id}/root:/{quote(normalized, safe='/')}:/content"
+        )
+        return response.content
+
+    def create_empty_file(self, folder_relative_path: PurePosixPath, filename: str) -> str:
+        """Create an empty file in the specified SharePoint folder."""
+        drive_id, _ = self._resolve_root_folder()
+        parent_item_id = self._ensure_folder_path(drive_id, folder_relative_path)
+        encoded_name = quote(filename, safe="")
+        response = self.client._make_request(
+            "PUT",
+            f"/drives/{drive_id}/items/{parent_item_id}:/{encoded_name}:/content",
+            headers={"Content-Type": "application/octet-stream"},
+            data=b""
+        )
+        item = response.json()
+        return item.get("webUrl", "")
 
     def upload_file(self, local_path: Path, relative_path: Path) -> str:
         """Upload a local CSV file to SharePoint."""
