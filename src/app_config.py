@@ -28,6 +28,11 @@ OUTPUT_FORMATS = {"both", "csv", "json"}
 AUTH_MODES = {"public", "confidential"}
 
 
+def _arg_or_default(args: argparse.Namespace, name: str, default: Any = None) -> Any:
+    """Read an argparse attribute, returning a default when the caller does not expose it."""
+    return getattr(args, name, default)
+
+
 def _ensure_mapping(value: Any, field_name: str) -> dict[str, Any]:
     if value is None:
         return {}
@@ -398,10 +403,16 @@ class AppConfig:
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any], args: argparse.Namespace) -> "AppConfig":
+        clear_cache = bool(_arg_or_default(args, "clear_cache", False))
+        team_regex = _arg_or_default(args, "team_regex")
+        lookback_days = _arg_or_default(args, "lookback_days")
+        lookahead_days = _arg_or_default(args, "lookahead_days")
+        min_csv_report_duration_seconds = _arg_or_default(args, "min_csv_report_duration_seconds")
+
         auth = AuthConfig.from_mapping(
             _ensure_mapping(raw.get("auth"), "auth"),
             default_scopes=PUBLIC_SCOPES_DEFAULT,
-            clear_cache=args.clear_cache,
+            clear_cache=clear_cache,
         )
         cache = CacheConfig.from_mapping(_ensure_mapping(raw.get("cache"), "cache"))
 
@@ -409,23 +420,23 @@ class AppConfig:
             auth=auth,
             team_filter=TeamFilterConfig.from_mapping(
                 _ensure_mapping(raw.get("team_filter"), "team_filter"),
-                regex_override=args.team_regex,
+                regex_override=team_regex,
             ),
             meetings=MeetingsConfig.from_mapping(
                 _ensure_mapping(raw.get("meetings"), "meetings"),
-                lookback_days_override=args.lookback_days,
-                lookahead_days_override=args.lookahead_days,
+                lookback_days_override=lookback_days,
+                lookahead_days_override=lookahead_days,
             ),
             output=OutputConfig.from_mapping(
                 _ensure_mapping(raw.get("output"), "output"),
                 base_auth=auth,
-                min_csv_report_duration_seconds_override=args.min_csv_report_duration_seconds,
-                clear_cache=args.clear_cache,
+                min_csv_report_duration_seconds_override=min_csv_report_duration_seconds,
+                clear_cache=clear_cache,
             ),
             reports_email=ReportsEmailConfig.from_mapping(
                 _ensure_mapping(raw.get("reports_email"), "reports_email"),
                 base_auth=auth,
-                clear_cache=args.clear_cache,
+                clear_cache=clear_cache,
             ),
             cache=cache,
             api=APIConfig.from_mapping(_ensure_mapping(raw.get("api"), "api")),

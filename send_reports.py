@@ -40,10 +40,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Scan and log the actions without sending mail or creating SENT markers"
     )
-    parser.add_argument("--team-regex")
-    parser.add_argument("--lookback-days", type=int)
-    parser.add_argument("--lookahead-days", type=int)
-    parser.add_argument("--min-csv-report-duration-seconds", type=int)
     return parser.parse_args()
 
 
