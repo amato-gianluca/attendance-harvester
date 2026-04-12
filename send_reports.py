@@ -14,6 +14,9 @@ from pathlib import Path, PurePosixPath
 from main import build_sharepoint_csv_uploader, setup_logging
 from src.app_config import AppConfig, load_app_config
 
+OPEN_FOLDER_SUFFIX = " [open]"
+CLOSED_FOLDER_SUFFIX = " [closed]"
+
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for report delivery."""
@@ -43,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_team_directory_rows(team_dirs_file: str) -> dict[str, dict[str, str]]:
+def load_team_directory_rows(team_dirs_file: str, *, folder_suffix: str = "") -> dict[str, dict[str, str]]:
     """Load team directory metadata keyed by SharePoint folder name."""
     with open(team_dirs_file, "r", encoding="utf-8", newline="") as csv_file:
         reader = csv.DictReader(csv_file)
@@ -51,7 +54,9 @@ def load_team_directory_rows(team_dirs_file: str) -> dict[str, dict[str, str]]:
         for row in reader:
             directory = (row.get("directory") or "").strip()
             if directory:
-                rows[directory] = {key: (value or "").strip() for key, value in row.items() if key}
+                rows[f"{directory}{folder_suffix}"] = {
+                    key: (value or "").strip() for key, value in row.items() if key
+                }
         return rows
 
 
@@ -148,14 +153,21 @@ def run_send_reports(config: AppConfig, *, dry_run: bool = False) -> None:
     if not team_directories_file:
         raise ValueError("output.team_directories_file is required")
 
-    team_rows = load_team_directory_rows(team_directories_file)
+    team_rows = load_team_directory_rows(team_directories_file, folder_suffix=CLOSED_FOLDER_SUFFIX)
+    expected_directories = set(team_rows)
     template_file = config.reports_email.template_file
     if not template_file.exists():
         raise FileNotFoundError(f"Mail template file not found: {template_file}")
 
     attachment_name = config.reports_email.attachment_filename
     sent_marker_name = config.reports_email.sent_marker_filename
-    report_files = uploader.find_files_by_name(attachment_name)
+    report_files = [
+        report_file for report_file in uploader.find_files_by_name(attachment_name)
+        if get_team_directory_name(
+            uploader.folder_path,
+            report_file["_parent_relative_path"]
+        ) in expected_directories
+    ]
 
     logger.info("Found %d SharePoint file(s) named %s", len(report_files), attachment_name)
     if not report_files:

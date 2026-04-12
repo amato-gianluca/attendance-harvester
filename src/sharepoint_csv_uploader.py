@@ -31,6 +31,17 @@ class SharePointCSVUploader:
         self.drive_name = (drive_name or "Documents").strip()
         self.folder_path = folder_path.strip("/") if folder_path else ""
 
+    @staticmethod
+    def _apply_top_level_folder_suffix(relative_path: Path, folder_suffix: str) -> PurePosixPath:
+        """Append a suffix to the top-level folder in a relative upload path."""
+        remote_relative_path = PurePosixPath(relative_path.as_posix())
+        if not folder_suffix or not remote_relative_path.parts:
+            return remote_relative_path
+
+        first_part, *remaining_parts = remote_relative_path.parts
+        suffixed_first_part = f"{first_part}{folder_suffix}"
+        return PurePosixPath(suffixed_first_part, *remaining_parts)
+
     def _resolve_site_id(self) -> str:
         """Resolve SharePoint site ID from config."""
         if self.site_id:
@@ -222,12 +233,34 @@ class SharePointCSVUploader:
         item = response.json()
         return item.get("webUrl", "")
 
-    def upload_file(self, local_path: Path, relative_path: Path) -> str:
+    def upload_file(
+        self,
+        local_path: Path,
+        relative_path: Path,
+        *,
+        top_level_folder_suffix: str = "",
+        create_remote_folders: bool = True,
+    ) -> str:
         """Upload a local CSV file to SharePoint."""
         drive_id = self._resolve_drive_id()
-        remote_path = PurePosixPath(self.folder_path) / PurePosixPath(relative_path.as_posix())
+        remote_relative_path = self._apply_top_level_folder_suffix(
+            relative_path,
+            top_level_folder_suffix
+        )
+        remote_path = PurePosixPath(self.folder_path) / remote_relative_path
         parent_folder = remote_path.parent
-        parent_item_id = self._ensure_folder_path(drive_id, parent_folder)
+        if create_remote_folders:
+            parent_item_id = self._ensure_folder_path(drive_id, parent_folder)
+        else:
+            parent_item = self._get_item_by_path(drive_id, parent_folder)
+            if not parent_item or not isinstance(parent_item.get("folder"), dict):
+                logger.warning(
+                    "Skipping SharePoint upload for %s: target folder does not exist: %s",
+                    local_path,
+                    parent_folder.as_posix()
+                )
+                return ""
+            parent_item_id = parent_item["id"]
 
         with open(local_path, "rb") as f:
             content = f.read()
@@ -245,7 +278,14 @@ class SharePointCSVUploader:
 
         return web_url
 
-    def upload_files(self, file_paths: list[Path], local_csv_root: Path) -> list[str]:
+    def upload_files(
+        self,
+        file_paths: list[Path],
+        local_csv_root: Path,
+        *,
+        top_level_folder_suffix: str = "",
+        create_remote_folders: bool = True,
+    ) -> list[str]:
         """Upload multiple CSV files preserving their relative directory structure."""
         uploaded_urls: list[str] = []
         root = local_csv_root.resolve()
@@ -257,6 +297,13 @@ class SharePointCSVUploader:
             except ValueError:
                 relative_path = Path(resolved.name)
 
-            uploaded_urls.append(self.upload_file(resolved, relative_path))
+            uploaded_url = self.upload_file(
+                resolved,
+                relative_path,
+                top_level_folder_suffix=top_level_folder_suffix,
+                create_remote_folders=create_remote_folders
+            )
+            if uploaded_url:
+                uploaded_urls.append(uploaded_url)
 
         return uploaded_urls

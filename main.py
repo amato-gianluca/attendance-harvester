@@ -199,7 +199,12 @@ def upload_csv_exports_to_sharepoint(uploader, exporter: AttendanceExporter, cre
     if not csv_files:
         return []
 
-    return uploader.upload_files(csv_files, exporter.csv_output_dir)
+    return uploader.upload_files(
+        csv_files,
+        exporter.csv_output_dir,
+        top_level_folder_suffix=" [open]",
+        create_remote_folders=False
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -309,7 +314,12 @@ def run_upload_csv_to_sharepoint(config: AppConfig) -> None:
 
     csv_root = get_csv_output_dir(config)
     csv_files = sorted(csv_root.rglob("*.csv"))
-    uploaded_files = uploader.upload_files(csv_files, csv_root)
+    uploaded_files = uploader.upload_files(
+        csv_files,
+        csv_root,
+        top_level_folder_suffix=" [open]",
+        create_remote_folders=False
+    )
 
     logger.info("=" * 70)
     logger.info("SUMMARY")
