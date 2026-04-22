@@ -6,10 +6,14 @@ import argparse
 import csv
 import io
 import logging
+import os
 import re
 from pathlib import Path
 
 from src.app_config import load_app_config
+from src.auth import Authenticator
+from src.graph_client import GraphClient
+from src.sharepoint_csv_uploader import SharePointCSVUploader
 
 
 LOGGER = logging.getLogger(__name__)
@@ -167,7 +171,7 @@ def evaluate_courses(csv_root_dir: Path, tolerance_seconds: int = 0) -> tuple[li
     """Evaluate all course directories and split them into completed/non-completed.
 
     For each course, finds the In-Meeting Duration of the course instructor (matched by name)
-    across all CSV files in that course, taking the maximum.
+    across all CSV files in that course, summing durations.
 
     Args:
         csv_root_dir: Root directory containing course subdirectories
@@ -219,6 +223,65 @@ def evaluate_courses(csv_root_dir: Path, tolerance_seconds: int = 0) -> tuple[li
     return completed, not_completed
 
 
+def build_sharepoint_uploader(config) -> SharePointCSVUploader | None:
+    """Build SharePoint uploader client for folder-status checks."""
+    sharepoint_config = config.output.sharepoint_csv
+
+    client_secret = sharepoint_config.auth.client_secret or os.getenv("TEAMS_HARVESTER_CLIENT_SECRET")
+    cache_dir_path = config.cache.directory
+    cache_dir_path.mkdir(parents=True, exist_ok=True)
+
+    authenticator = Authenticator(
+        client_id=sharepoint_config.auth.client_id,
+        authority=sharepoint_config.auth.authority,
+        scopes=sharepoint_config.auth.scopes,
+        cache_path=cache_dir_path / sharepoint_config.auth.token_cache,
+        auth_mode=sharepoint_config.auth.mode,
+        client_secret=client_secret,
+    )
+    if sharepoint_config.auth.clear_cache:
+        authenticator.clear_cache()
+
+    access_token = authenticator.acquire_token()
+    graph_client = GraphClient(
+        access_token=access_token,
+        max_retries=config.api.max_retries,
+        retry_backoff_factor=config.api.retry_backoff_factor,
+        timeout=config.api.timeout,
+    )
+    return SharePointCSVUploader(
+        graph_client=graph_client,
+        site_id=sharepoint_config.site_id,
+        site_hostname=sharepoint_config.site_hostname,
+        site_path=sharepoint_config.site_path,
+        drive_id=sharepoint_config.drive_id,
+        drive_name=sharepoint_config.drive_name,
+        folder_path=sharepoint_config.folder_path,
+    )
+
+
+def get_processed_courses_on_sharepoint(uploader: SharePointCSVUploader, course_names: list[str]) -> set[str]:
+    """Return course names marked as processed on SharePoint via '[closed]' folder suffix."""
+    drive_id, root_folder = uploader._resolve_root_folder()
+    root_item = uploader._get_item_by_path(drive_id, root_folder)
+    if not root_item:
+        return set()
+
+    children = uploader._list_children(drive_id, root_item["id"])
+    child_folder_names = {
+        str(child.get("name", "")).strip()
+        for child in children
+        if isinstance(child.get("folder"), dict)
+    }
+
+    processed: set[str] = set()
+    for course_name in course_names:
+        if f"{course_name} [closed]" in child_folder_names:
+            processed.add(course_name)
+
+    return processed
+
+
 def print_section(title: str, courses: list[dict]) -> None:
     """Print one section of the final report."""
     print(title)
@@ -257,13 +320,28 @@ def main() -> None:
 
     completed, not_completed = evaluate_courses(csv_root_dir, tolerance_seconds)
 
+    processed_course_names: set[str] = set()
+    try:
+        uploader = build_sharepoint_uploader(config)
+        if uploader is not None:
+            processed_course_names = get_processed_courses_on_sharepoint(
+                uploader,
+                [course["name"] for course in completed],
+            )
+    except Exception as exc:
+        LOGGER.warning("SharePoint processed-check unavailable: %s", exc)
+
+    completed_processed = [course for course in completed if course["name"] in processed_course_names]
+    completed_not_processed = [course for course in completed if course["name"] not in processed_course_names]
+
     print()
     print(f"Directory CSV analizzata: {csv_root_dir}")
     print(f"Totale corsi valutati: {len(completed) + len(not_completed)}")
     if tolerance_minutes > 0:
         print(f"Tolleranza di completamento: {tolerance_minutes} minuti")
     print()
-    print_section("Corsi terminati", completed)
+    print_section("Corsi terminati e processati", completed_processed)
+    print_section("Corsi terminati e NON processati", completed_not_processed)
     print_section("Corsi non terminati", not_completed)
 
 
