@@ -233,14 +233,20 @@ class AttendanceExporter:
         meetingEndDateTime = datetime.fromisoformat(attendance_data["report_data"]["meetingEndDateTime"])
         duration = meetingEndDateTime - meetingStartDateTime
 
+        # Calculate average attendance time for comparison
+        participant_count = attendance_data["report_data"]["totalParticipantCount"]
+        total_time = sum(sum(ai["durationInSeconds"] for ai in ar["attendanceIntervals"])
+                         for ar in attendance_data["attendance_records"])
+        avg_time = round(total_time / participant_count) if participant_count > 0 else 0
+
         if (
             self.min_csv_report_duration_seconds > 0
-            and duration.total_seconds() < self.min_csv_report_duration_seconds
+            and avg_time < self.min_csv_report_duration_seconds
         ):
             logger.info(
-                "Skipping CSV for %s: report duration %ss is below minimum %ss",
+                "Skipping CSV for %s: average attendance time %ss is below minimum %ss",
                 filename,
-                duration.total_seconds(),
+                avg_time,
                 self.min_csv_report_duration_seconds
             )
             return None
@@ -253,10 +259,6 @@ class AttendanceExporter:
         )
 
         with open(filepath, "w") as file:
-            participant_count = attendance_data["report_data"]["totalParticipantCount"]
-            total_time = sum(sum(ai["durationInSeconds"] for ai in ar["attendanceIntervals"])
-                             for ar in attendance_data["attendance_records"])
-            avg_time = round(total_time / participant_count) if participant_count > 0 else 0
 
             writer = csv.writer(file, delimiter='\t')
             writer.writerow(['1. Summary'])
