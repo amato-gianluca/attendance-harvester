@@ -253,7 +253,8 @@ class AttendanceExporter:
 
         # Check if there's at least one presenter with @unich.it email
         has_unich_presenter = any(
-            ar["emailAddress"].endswith("@unich.it") and ar["role"].lower() == "presenter"
+            str(ar.get("emailAddress") or "").lower().endswith("@unich.it")
+            and str(ar.get("role") or "").lower() == "presenter"
             for ar in attendance_data["attendance_records"]
         )
         if not has_unich_presenter:
