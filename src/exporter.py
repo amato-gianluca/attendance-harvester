@@ -270,6 +270,15 @@ class AttendanceExporter:
             extension="csv"
         )
 
+        bad_filepath = filepath.with_name(f"{filepath.name}.bad")
+        if bad_filepath.exists():
+            logger.info(
+                "Skipping CSV for %s: marker file exists at %s",
+                filename,
+                bad_filepath
+            )
+            return None
+
         with open(filepath, "w") as file:
 
             writer = csv.writer(file, delimiter='\t')
