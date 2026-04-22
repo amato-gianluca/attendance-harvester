@@ -251,6 +251,18 @@ class AttendanceExporter:
             )
             return None
 
+        # Check if there's at least one presenter with @unich.it email
+        has_unich_presenter = any(
+            ar["emailAddress"].endswith("@unich.it") and ar["role"].lower() == "presenter"
+            for ar in attendance_data["attendance_records"]
+        )
+        if not has_unich_presenter:
+            logger.info(
+                "Skipping CSV for %s: no presenter with @unich.it email found",
+                filename
+            )
+            return None
+
         filepath = self._build_team_scoped_filepath(
             attendance_data=attendance_data,
             filename=filename,
