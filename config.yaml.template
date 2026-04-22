@@ -124,6 +124,12 @@ output:
         - "Files.ReadWrite.All"
         - "Sites.ReadWrite.All"
 
+# Course Completion Settings
+completion:
+  # Tolerance in minutes for course completion threshold
+  # If set to 10, a course requiring 6 hours is considered complete with 5h 50m or more
+  tolerance_minutes: 10
+
 reports_email:
   sender: "gianluca.amato@unich.it"
   bcc_recipients: []

@@ -377,6 +377,20 @@ class CacheConfig:
 
 
 @dataclass(frozen=True)
+class CompletionConfig:
+    """Configuration for course completion checking."""
+    tolerance_minutes: int
+
+    @classmethod
+    def from_mapping(cls, raw: dict[str, Any]) -> "CompletionConfig":
+        return cls(
+            tolerance_minutes=_optional_non_negative_int(
+                raw.get("tolerance_minutes"), 0, "completion.tolerance_minutes"
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class APIConfig:
     max_retries: int
     retry_backoff_factor: int
@@ -400,6 +414,7 @@ class AppConfig:
     reports_email: ReportsEmailConfig
     cache: CacheConfig
     api: APIConfig
+    completion: CompletionConfig
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any], args: argparse.Namespace) -> "AppConfig":
@@ -440,6 +455,7 @@ class AppConfig:
             ),
             cache=cache,
             api=APIConfig.from_mapping(_ensure_mapping(raw.get("api"), "api")),
+            completion=CompletionConfig.from_mapping(_ensure_mapping(raw.get("completion"), "completion")),
         )
 
 
