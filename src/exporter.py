@@ -70,6 +70,16 @@ class AttendanceExporter:
         logger.info("Loaded %d team directory mappings from %s", len(mapping), path)
         return mapping
 
+    @staticmethod
+    def _extract_instructor_name(directory_name: str) -> str:
+        """Extract instructor name from mapped directory, removing bracketed suffixes."""
+        return directory_name.split("[")[0].strip()
+
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """Normalize names for robust case-insensitive comparisons."""
+        return " ".join(name.split()).casefold()
+
     def _build_team_scoped_filepath(self, attendance_data: dict, filename: str,
                                     base_dir: Path, extension: str) -> Path:
         """Build output path, routing by team-specific directory when configured."""
@@ -251,18 +261,29 @@ class AttendanceExporter:
             )
             return None
 
-        # Check if there's at least one presenter with @unich.it email
-        has_unich_presenter = any(
-            str(ar.get("emailAddress") or "").lower().endswith("@unich.it")
-            and str(ar.get("role") or "").lower() == "presenter"
-            for ar in attendance_data["attendance_records"]
-        )
-        if not has_unich_presenter:
-            logger.info(
-                "Skipping CSV for %s: no presenter with @unich.it email found",
-                filename
+        # Require at least one participant matching the instructor name extracted
+        # from the mapped output directory (same idea used by check_completed.py).
+        team_id = ""
+        teams_context = attendance_data.get("teams_context", [])
+        if teams_context:
+            team_id = str(teams_context[0].get("team", {}).get("id", "")).strip()
+
+        mapped_directory = self.team_directories.get(team_id, "")
+        instructor_name = self._extract_instructor_name(mapped_directory) if mapped_directory else ""
+
+        if instructor_name:
+            instructor_name_norm = self._normalize_name(instructor_name)
+            has_instructor = any(
+                self._normalize_name(str(ar.get("identity", {}).get("displayName") or "")) == instructor_name_norm
+                for ar in attendance_data["attendance_records"]
             )
-            return None
+            if not has_instructor:
+                logger.info(
+                    "Skipping CSV for %s: instructor '%s' not found among participants",
+                    filename,
+                    instructor_name
+                )
+                return None
 
         filepath = self._build_team_scoped_filepath(
             attendance_data=attendance_data,
