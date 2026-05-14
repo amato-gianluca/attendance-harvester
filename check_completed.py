@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional CSV root directory override (default: output.csv_directory from config)",
     )
     parser.add_argument(
+        "--team-dirs-csv",
+        default="team_dirs.csv",
+        help="Path to team_dirs.csv (default: team_dirs.csv)",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose logging",
@@ -54,14 +59,45 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
-def extract_instructor_name(directory_name: str) -> str:
-    """Extract instructor name from directory name, removing all bracketed suffixes.
+def parse_email_list(raw_value: str) -> set[str]:
+    """Parse comma-separated email list into a normalized set."""
+    if not raw_value:
+        return set()
+    return {
+        email.strip().lower()
+        for email in raw_value.split(",")
+        if email.strip()
+    }
 
-    Example: "CLAUDIO CRIVELLARI [a] [24]" -> "CLAUDIO CRIVELLARI"
-    """
-    # Remove everything after and including the first [ character
-    name = directory_name.split("[")[0].strip()
-    return name
+
+def load_course_teacher_emails(team_dirs_csv: Path) -> dict[str, set[str]]:
+    """Load teacher emails per course directory from team_dirs.csv."""
+    content = read_text_with_fallbacks(team_dirs_csv)
+    reader = csv.DictReader(io.StringIO(content))
+
+    expected_columns = {"directory", "team_owner", "additional_teachers"}
+    if not reader.fieldnames or not expected_columns.issubset(set(reader.fieldnames)):
+        raise ValueError(
+            f"Missing required columns in {team_dirs_csv}: {sorted(expected_columns)}"
+        )
+
+    mapping: dict[str, set[str]] = {}
+    for row in reader:
+        directory_name = (row.get("directory") or "").strip()
+        if not directory_name:
+            continue
+
+        teacher_emails: set[str] = set()
+        team_owner = (row.get("team_owner") or "").strip().lower()
+        if team_owner:
+            teacher_emails.add(team_owner)
+
+        teacher_emails.update(parse_email_list(row.get("additional_teachers") or ""))
+
+        if teacher_emails:
+            mapping[directory_name] = teacher_emails
+
+    return mapping
 
 
 def parse_expected_hours(directory_name: str) -> int | None:
@@ -105,16 +141,15 @@ def read_text_with_fallbacks(path: Path) -> str:
     raise UnicodeDecodeError("unknown", b"", 0, 1, f"Cannot decode file {path}")
 
 
-def extract_instructor_duration(csv_file: Path, instructor_name: str) -> int:
+def extract_max_teacher_duration(csv_file: Path, teacher_emails: set[str]) -> int:
     """
-    Extract the 'In-Meeting Duration' for a specific instructor from a CSV file.
+    Extract the max 'In-Meeting Duration' among teachers present in a CSV file.
 
-    Matches the instructor name in the first column (case-insensitive).
+    A CSV is considered valid when at least one participant email matches a teacher email.
     """
     content = read_text_with_fallbacks(csv_file)
     delimiters = ("\t", ",", ";")
-
-    instructor_name_lower = instructor_name.lower()
+    found_participants_section = False
 
     for delimiter in delimiters:
         reader = csv.reader(io.StringIO(content), delimiter=delimiter)
@@ -129,35 +164,40 @@ def extract_instructor_duration(csv_file: Path, instructor_name: str) -> int:
 
         if participants_idx is None:
             continue  # Try next delimiter
+        found_participants_section = True
 
         if participants_idx + 1 >= len(rows):
             raise ValueError("Participants section header found but no rows follow")
 
         # Columns are at fixed positions in the standard export format:
         # 0: Name, 1: First Join, 2: Last Leave, 3: In-Meeting Duration, 4: Email, 5: Participant ID, 6: Role
-        name_idx = 0
+        email_idx = 4
         duration_idx = 3
+        matched_durations: list[int] = []
 
-        # Search for the instructor in this CSV
+        # Search all teacher participants in this CSV and keep the maximum duration.
         for row in rows[participants_idx + 2:]:
             if not any(cell.strip() for cell in row):
                 break
-            if len(row) <= max(name_idx, duration_idx):
+            if len(row) <= max(email_idx, duration_idx):
                 continue
 
-            name = row[name_idx].strip()
-            if name.lower() == instructor_name_lower:
+            email = row[email_idx].strip().lower()
+            if email in teacher_emails:
                 try:
                     duration_str = row[duration_idx].strip()
                     duration_secs = parse_duration_to_seconds(duration_str)
-                    return duration_secs
+                    matched_durations.append(duration_secs)
                 except Exception as exc:
                     raise ValueError(f"Could not parse duration '{duration_str}': {exc}")
 
-        # If we found the section but not the instructor, continue to next delimiter
-        raise ValueError(f"Instructor '{instructor_name}' not found in Participants section")
+        if matched_durations:
+            return max(matched_durations)
 
-    raise ValueError("Could not find Participants section in any delimiter variant")
+    if not found_participants_section:
+        raise ValueError("Could not find Participants section in any delimiter variant")
+
+    raise ValueError("No teacher found in Participants section")
 
 
 def format_seconds(total_seconds: int) -> str:
@@ -167,14 +207,19 @@ def format_seconds(total_seconds: int) -> str:
     return f"{hours:02}:{minutes:02}:{seconds:02}"
 
 
-def evaluate_courses(csv_root_dir: Path, tolerance_seconds: int = 0) -> tuple[list[dict], list[dict]]:
+def evaluate_courses(
+    csv_root_dir: Path,
+    course_teacher_emails: dict[str, set[str]],
+    tolerance_seconds: int = 0,
+) -> tuple[list[dict], list[dict]]:
     """Evaluate all course directories and split them into completed/non-completed.
 
-    For each course, finds the In-Meeting Duration of the course instructor (matched by name)
-    across all CSV files in that course, summing durations.
+    For each course, considers as teachers the emails from team_owner/additional_teachers,
+    and for each CSV sums the maximum duration among teachers present.
 
     Args:
         csv_root_dir: Root directory containing course subdirectories
+        course_teacher_emails: Mapping from course directory name to teacher emails
         tolerance_seconds: Tolerance in seconds for completion threshold (default: 0)
                           If set to 600, a course requiring 6 hours is considered complete
                           with 5h 50m or more.
@@ -188,19 +233,22 @@ def evaluate_courses(csv_root_dir: Path, tolerance_seconds: int = 0) -> tuple[li
             LOGGER.warning("Skipping %s: expected hours [N] not found", course_dir.name)
             continue
 
-        instructor_name = extract_instructor_name(course_dir.name)
+        teacher_emails = course_teacher_emails.get(course_dir.name, set())
+        if not teacher_emails:
+            LOGGER.warning("No teachers configured in team_dirs.csv for %s", course_dir.name)
 
         total_seconds = 0
         parsed_files = 0
         csv_files = sorted(course_dir.glob("*.csv"))
 
-        for csv_file in csv_files:
-            try:
-                file_duration_seconds = extract_instructor_duration(csv_file, instructor_name)
-                total_seconds += file_duration_seconds
-                parsed_files += 1
-            except Exception as exc:
-                LOGGER.warning("Skipping %s: %s", csv_file, exc)
+        if teacher_emails:
+            for csv_file in csv_files:
+                try:
+                    file_duration_seconds = extract_max_teacher_duration(csv_file, teacher_emails)
+                    total_seconds += file_duration_seconds
+                    parsed_files += 1
+                except Exception as exc:
+                    LOGGER.warning("Skipping %s: %s", csv_file, exc)
 
         expected_seconds = expected_hours * 3600
         completion_threshold = expected_seconds - tolerance_seconds
@@ -311,6 +359,12 @@ def main() -> None:
     if not csv_root_dir.exists() or not csv_root_dir.is_dir():
         raise FileNotFoundError(f"CSV directory not found: {csv_root_dir}")
 
+    team_dirs_csv = Path(args.team_dirs_csv)
+    if not team_dirs_csv.exists() or not team_dirs_csv.is_file():
+        raise FileNotFoundError(f"team_dirs.csv not found: {team_dirs_csv}")
+
+    course_teacher_emails = load_course_teacher_emails(team_dirs_csv)
+
     # Get tolerance from config
     tolerance_minutes = config.completion.tolerance_minutes
     tolerance_seconds = tolerance_minutes * 60
@@ -318,7 +372,7 @@ def main() -> None:
     if tolerance_minutes > 0:
         LOGGER.info("Using completion tolerance: %d minute(s) (%d second(s))", tolerance_minutes, tolerance_seconds)
 
-    completed, not_completed = evaluate_courses(csv_root_dir, tolerance_seconds)
+    completed, not_completed = evaluate_courses(csv_root_dir, course_teacher_emails, tolerance_seconds)
 
     processed_course_names: set[str] = set()
     try:
