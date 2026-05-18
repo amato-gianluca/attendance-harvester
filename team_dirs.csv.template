@@ -1,0 +1,2 @@
+team_id,team_displayname,directory,team_owner,additional_teachers,additional_email
+00000000-0000-0000-0000-000000000000,Example Team Display Name,EXAMPLE TEACHER [a] [18],teacher@example.edu,"assistant.teacher@example.edu,co.teacher@example.edu",reports-cc@example.edu
