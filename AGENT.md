@@ -65,4 +65,17 @@ python -m py_compile main.py src/*.py
 
 ## Commit
 
-- Prepare commit messaged made from a short summary and a list of items with more specific details.
+- Before every commit, read this section and follow it.
+- Commit messages MUST use this structure:
+
+```text
+Short imperative summary
+
+- Specific detail about the main code or behavior change.
+- Specific detail about related config, docs, tests, or validation.
+- Specific detail about any compatibility behavior or fallback, when relevant.
+```
+
+- The body must summarize all staged changes, not only the most recent request.
+- Do not use a one-line commit message unless the staged diff is truly trivial.
+- Keep local artifacts such as `cache/`, generated `output/`, notebooks, or ad hoc CSV files out of commits unless explicitly requested.
