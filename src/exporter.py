@@ -131,6 +131,17 @@ class AttendanceExporter:
 
         return name
 
+    @staticmethod
+    def _parse_datetime(value: object) -> datetime | None:
+        """Parse a Graph datetime string, returning local time when possible."""
+        if not value:
+            return None
+
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone()
+        except (TypeError, ValueError):
+            return None
+
     def _build_filename(self, attendance_data: dict) -> str:
         """
         Build filename from attendance data and pattern.
@@ -148,6 +159,9 @@ class AttendanceExporter:
         channel_name = "unknown_channel"
         meeting_subject = meeting_info.get("subject", "unknown_subject")
         report_start = "unknown_report_start"
+        report_data = attendance_data.get("report_data", {})
+        report_start_raw = report_data.get("meetingStartDateTime", "")
+        report_start_dt = self._parse_datetime(report_start_raw)
 
         # Try to get team/channel from context
         teams_context = attendance_data.get("teams_context", [])
@@ -162,22 +176,21 @@ class AttendanceExporter:
         else:
             date_str = str(meeting_start)
 
-        try:
-            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone()
+        dt = self._parse_datetime(date_str)
+        if dt:
             meeting_date = dt.strftime("%Y%m%d_%H%M")
-            meeting_short_date = dt.strftime("%-m-%d-%y")
-        except:
+        else:
             meeting_date = "unknown_date"
-            meeting_short_date = "unknown_date"
 
-        report_data = attendance_data.get("report_data", {})
-        report_start_raw = report_data.get("meetingStartDateTime", "")
-        try:
-            report_start_dt = datetime.fromisoformat(
-                str(report_start_raw).replace("Z", "+00:00")
-            ).astimezone()
+        short_date_dt = report_start_dt or dt
+        if short_date_dt:
+            report_short_date = short_date_dt.strftime("%-m-%d-%y")
+        else:
+            report_short_date = "unknown_date"
+
+        if report_start_dt:
             report_start = report_start_dt.strftime("%Y%m%d_%H%M%S")
-        except:
+        else:
             if report_start_raw:
                 report_start = self._sanitize_filename(str(report_start_raw))
 
@@ -189,7 +202,7 @@ class AttendanceExporter:
             team_name=self._sanitize_filename(team_name),
             channel_name=self._sanitize_filename(channel_name),
             meeting_date=meeting_date,
-            meeting_short_date=meeting_short_date,
+            report_short_date=report_short_date,
             meeting_subject=self._sanitize_filename(meeting_subject),
             meeting_id=meeting_id,
             report_start=report_start,
