@@ -5,10 +5,19 @@ import csv
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TeamDirectory:
+    """Output directory and configured teacher emails for a Team."""
+
+    directory: str
+    teacher_emails: frozenset[str]
 
 
 class AttendanceExporter:
@@ -35,7 +44,8 @@ class AttendanceExporter:
             include_tags: Whether to keep attendance status tags in displayed names
             min_csv_report_duration_seconds: Minimum report duration in seconds
                 required before exporting a CSV
-            team_directories_file: CSV file mapping team IDs to CSV subdirectories
+            team_directories_file: CSV file mapping team IDs to subdirectories
+                and teacher emails
         """
         base_output_dir = Path(output_dir)
         self.csv_output_dir = Path(csv_output_dir) if csv_output_dir else base_output_dir / "csv"
@@ -48,8 +58,19 @@ class AttendanceExporter:
         self.team_directories = self._load_team_directories(team_directories_file)
 
     @staticmethod
-    def _load_team_directories(team_directories_file: str | None) -> dict[str, str]:
-        """Load team-id to directory mappings from CSV."""
+    def _parse_email_list(raw_value: str) -> set[str]:
+        """Parse comma-separated email list into a normalized set."""
+        if not raw_value:
+            return set()
+        return {
+            email.strip().lower()
+            for email in raw_value.split(",")
+            if email.strip()
+        }
+
+    @staticmethod
+    def _load_team_directories(team_directories_file: str | None) -> dict[str, TeamDirectory]:
+        """Load team-id mappings with output directories and teacher emails."""
         if not team_directories_file:
             return {}
 
@@ -58,39 +79,84 @@ class AttendanceExporter:
             logger.warning("Team directories file not found: %s", path)
             return {}
 
-        mapping: dict[str, str] = {}
+        mapping: dict[str, TeamDirectory] = {}
         with open(path, newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)
+            expected_columns = {"team_id", "directory", "team_owner", "additional_teachers"}
+            missing_columns = expected_columns.difference(reader.fieldnames or [])
+            if missing_columns:
+                logger.warning(
+                    "Team directories file %s is missing expected columns: %s",
+                    path,
+                    ", ".join(sorted(missing_columns))
+                )
+
             for row in reader:
                 team_id = (row.get("team_id") or "").strip()
                 directory = (row.get("directory") or "").strip()
-                if team_id and directory:
-                    mapping[team_id] = directory
+                if not team_id:
+                    continue
 
-        logger.info("Loaded %d team directory mappings from %s", len(mapping), path)
+                teacher_emails: set[str] = set()
+                team_owner = (row.get("team_owner") or "").strip().lower()
+                if team_owner:
+                    teacher_emails.add(team_owner)
+                teacher_emails.update(
+                    AttendanceExporter._parse_email_list(row.get("additional_teachers") or "")
+                )
+
+                if directory or teacher_emails:
+                    mapping[team_id] = TeamDirectory(
+                        directory=directory,
+                        teacher_emails=frozenset(teacher_emails)
+                    )
+
+        teacher_count = sum(len(team_directory.teacher_emails) for team_directory in mapping.values())
+        logger.info(
+            "Loaded %d team directory mappings and %d teacher email(s) from %s",
+            len(mapping),
+            teacher_count,
+            path
+        )
         return mapping
 
     @staticmethod
-    def _extract_instructor_name(directory_name: str) -> str:
-        """Extract instructor name from mapped directory, removing bracketed suffixes."""
-        return directory_name.split("[")[0].strip()
+    def _get_team_id(attendance_data: dict) -> str:
+        """Extract the Team ID from attendance data."""
+        teams_context = attendance_data.get("teams_context", [])
+        if not teams_context:
+            return ""
+        return str(teams_context[0].get("team", {}).get("id", "")).strip()
 
     @staticmethod
-    def _normalize_name(name: str) -> str:
-        """Normalize names for robust case-insensitive comparisons."""
-        return " ".join(name.split()).casefold()
+    def _attendance_email_addresses(attendance_data: dict) -> set[str]:
+        """Return normalized participant email addresses from attendance records."""
+        emails: set[str] = set()
+        for attendance_record in attendance_data.get("attendance_records", []):
+            email_address = str(attendance_record.get("emailAddress") or "").strip().lower()
+            if email_address:
+                emails.add(email_address)
+        return emails
+
+    @classmethod
+    def _has_configured_teacher_attendance(
+        cls,
+        attendance_data: dict,
+        teacher_emails: frozenset[str]
+    ) -> bool:
+        """Return True when at least one configured teacher is in attendance."""
+        if not teacher_emails:
+            return False
+        return bool(cls._attendance_email_addresses(attendance_data).intersection(teacher_emails))
 
     def _build_team_scoped_filepath(self, attendance_data: dict, filename: str,
                                     base_dir: Path, extension: str) -> Path:
         """Build output path, routing by team-specific directory when configured."""
-        team_id = ""
-        teams_context = attendance_data.get("teams_context", [])
-        if teams_context:
-            team_id = str(teams_context[0].get("team", {}).get("id", "")).strip()
+        team_id = self._get_team_id(attendance_data)
 
-        directory_name = self.team_directories.get(team_id)
-        if directory_name:
-            output_dir = base_dir / directory_name
+        team_directory = self.team_directories.get(team_id)
+        if team_directory and team_directory.directory:
+            output_dir = base_dir / team_directory.directory
             output_dir.mkdir(parents=True, exist_ok=True)
             return output_dir / f"{filename}.{extension}"
 
@@ -274,29 +340,35 @@ class AttendanceExporter:
             )
             return None
 
-        # Require at least one participant matching the instructor name extracted
-        # from the mapped output directory (same idea used by check_completed.py).
-        team_id = ""
-        teams_context = attendance_data.get("teams_context", [])
-        if teams_context:
-            team_id = str(teams_context[0].get("team", {}).get("id", "")).strip()
-
-        mapped_directory = self.team_directories.get(team_id, "")
-        instructor_name = self._extract_instructor_name(mapped_directory) if mapped_directory else ""
-
-        if instructor_name:
-            instructor_name_norm = self._normalize_name(instructor_name)
-            has_instructor = any(
-                self._normalize_name(str(ar.get("identity", {}).get("displayName") or "")) == instructor_name_norm
-                for ar in attendance_data["attendance_records"]
+        # Require at least one configured teacher email from team_dirs.csv
+        # to appear in the attendance records.
+        team_id = self._get_team_id(attendance_data)
+        team_directory = self.team_directories.get(team_id)
+        if not team_directory:
+            logger.info(
+                "Skipping CSV for %s: no team_dirs.csv row found for team %s",
+                filename,
+                team_id or "unknown"
             )
-            if not has_instructor:
-                logger.info(
-                    "Skipping CSV for %s: instructor '%s' not found among participants",
-                    filename,
-                    instructor_name
-                )
-                return None
+            return None
+
+        if not team_directory.teacher_emails:
+            logger.info(
+                "Skipping CSV for %s: no teacher emails configured for team %s",
+                filename,
+                team_id or "unknown"
+            )
+            return None
+
+        if not self._has_configured_teacher_attendance(
+            attendance_data,
+            team_directory.teacher_emails
+        ):
+            logger.info(
+                "Skipping CSV for %s: no configured teacher email found among participants",
+                filename
+            )
+            return None
 
         filepath = self._build_team_scoped_filepath(
             attendance_data=attendance_data,
