@@ -309,22 +309,37 @@ def build_sharepoint_uploader(config) -> SharePointCSVUploader | None:
 
 
 def get_processed_courses_on_sharepoint(uploader: SharePointCSVUploader, course_names: list[str]) -> set[str]:
-    """Return course names marked as processed on SharePoint via '[closed]' folder suffix."""
+    """Return course names marked as processed on SharePoint.
+
+    A course is considered processed when:
+    - its SharePoint folder contains a file named 'SENT', or
+    - a folder named '<course> [closed]' exists (legacy behavior).
+    """
     drive_id, root_folder = uploader._resolve_root_folder()
     root_item = uploader._get_item_by_path(drive_id, root_folder)
     if not root_item:
         return set()
 
     children = uploader._list_children(drive_id, root_item["id"])
-    child_folder_names = {
-        str(child.get("name", "")).strip()
+    folder_items: dict[str, dict] = {
+        str(child.get("name", "")).strip(): child
         for child in children
         if isinstance(child.get("folder"), dict)
     }
 
     processed: set[str] = set()
     for course_name in course_names:
-        if f"{course_name} [closed]" in child_folder_names:
+        # Preserve historical '[closed]' marker behavior.
+        if f"{course_name} [closed]" in folder_items:
+            processed.add(course_name)
+            continue
+
+        course_folder_item = folder_items.get(course_name)
+        if not course_folder_item:
+            continue
+
+        folder_children = uploader._list_children(drive_id, course_folder_item["id"])
+        if any(str(child.get("name", "")).strip().upper() == "SENT" for child in folder_children):
             processed.add(course_name)
 
     return processed
@@ -378,14 +393,18 @@ def main() -> None:
     try:
         uploader = build_sharepoint_uploader(config)
         if uploader is not None:
+            all_course_names = [course["name"] for course in completed] + [course["name"] for course in not_completed]
             processed_course_names = get_processed_courses_on_sharepoint(
                 uploader,
-                [course["name"] for course in completed],
+                all_course_names,
             )
     except Exception as exc:
         LOGGER.warning("SharePoint processed-check unavailable: %s", exc)
 
-    completed_processed = [course for course in completed if course["name"] in processed_course_names]
+    forced_completed = [course for course in not_completed if course["name"] in processed_course_names]
+    still_not_completed = [course for course in not_completed if course["name"] not in processed_course_names]
+
+    completed_processed = [course for course in completed if course["name"] in processed_course_names] + forced_completed
     completed_not_processed = [course for course in completed if course["name"] not in processed_course_names]
 
     print()
@@ -396,7 +415,7 @@ def main() -> None:
     print()
     print_section("Corsi terminati e processati", completed_processed)
     print_section("Corsi terminati e NON processati", completed_not_processed)
-    print_section("Corsi non terminati", not_completed)
+    print_section("Corsi non terminati", still_not_completed)
 
 
 if __name__ == "__main__":
