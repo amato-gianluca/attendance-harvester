@@ -89,6 +89,21 @@ class MeetingResolver:
         }
         return online_meeting
 
+    @staticmethod
+    def _build_event_from_call_record(call_record: dict) -> dict:
+        """Project a callRecord into the event shape used by the existing pipeline."""
+        organizer = call_record.get("organizer_v2", {}).get("identity", {})
+        call_record_id = call_record.get("id", "")
+
+        return {
+            "id": call_record_id,
+            "subject": call_record.get("joinWebUrl") or f"callRecord:{call_record_id}",
+            "start": {"dateTime": call_record.get("startDateTime")},
+            "end": {"dateTime": call_record.get("endDateTime")},
+            "organizer": organizer,
+            "onlineMeeting": {"joinUrl": call_record.get("joinWebUrl", "")},
+        }
+
     def get_meetings_in_date_range(self, lookback_days: int, lookahead_days: int = 0) -> list[dict]:
         """
         Get all Teams meetings in the specified date range.
@@ -597,5 +612,132 @@ class MeetingResolver:
             len(all_attendance),
             matched_events,
             len(all_events)
+        )
+        return all_attendance
+
+    def extract_all_attendance_for_user(self, teams_with_channels: list[dict],
+                                        user_upn: str,
+                                        lookback_days: int,
+                                        lookahead_days: int = 0) -> list[dict]:
+        """
+        Extract attendance by starting from call records for a specific user.
+
+        Args:
+            teams_with_channels: list of dicts with 'team' and 'channel' keys
+            user_upn: User principal name used to discover relevant call records
+            lookback_days: Number of days to look back
+            lookahead_days: Number of days to look ahead
+
+        Returns:
+            list of attendance data dictionaries
+        """
+        now = datetime.now(timezone.utc)
+        start_time = now - timedelta(days=max(0, lookback_days))
+        end_time = now + timedelta(days=max(0, lookahead_days))
+
+        start_str = start_time.isoformat()
+        end_str = end_time.isoformat()
+
+        target_user = self.client.get_user(user_upn)
+        if not target_user:
+            raise ValueError(f"User not found: {user_upn}")
+
+        participant_id = target_user.get("id")
+        if not participant_id:
+            raise ValueError(f"Resolved user has no object ID: {user_upn}")
+
+        call_records = self.client.get_call_records_for_participant(
+            participant_id,
+            start_str,
+            end_str
+        )
+        if not call_records:
+            logger.warning(
+                "No call records found for %s in the specified time range",
+                target_user.get("userPrincipalName", user_upn)
+            )
+            return []
+
+        logger.info(
+            "Found %d call records for %s",
+            len(call_records),
+            target_user.get("userPrincipalName", user_upn)
+        )
+
+        all_attendance = []
+        matched_records = 0
+        meetings_by_context: dict[str, dict] = {}
+
+        for call_record in call_records:
+            event = self._build_event_from_call_record(call_record)
+            event_subject = event.get("subject", "Unknown")
+            logger.info("Processing call record: %s", event_subject)
+
+            matched_contexts = self._match_event_contexts_from_join_url(
+                event,
+                teams_with_channels
+            )
+            if not matched_contexts:
+                logger.debug(
+                    "Skipping call record with no team/channel match from join URL thread id: %s",
+                    call_record.get("id", event_subject)
+                )
+                continue
+
+            fallback_user_ids = self._get_owner_fallback_user_ids(matched_contexts)
+            online_meeting, resolved_user_id = self.resolve_online_meeting(
+                event,
+                fallback_user_ids=fallback_user_ids
+            )
+            if not online_meeting:
+                continue
+
+            online_meeting["_resolved_user_id"] = resolved_user_id
+            matched_records += 1
+
+            context_key = self._get_context_key(online_meeting, matched_contexts)
+            group = meetings_by_context.setdefault(context_key, {
+                "online_meetings": [],
+                "online_meeting_ids": set(),
+                "meetings": []
+            })
+
+            if online_meeting.get("id") and online_meeting["id"] not in group["online_meeting_ids"]:
+                group["online_meetings"].append(online_meeting)
+                group["online_meeting_ids"].add(online_meeting["id"])
+
+            group["meetings"].append({
+                "meeting_id": online_meeting.get("id", online_meeting.get("_calendar_event_id", "")),
+                "meeting_info": online_meeting.get("_event", {}),
+                "teams_context": matched_contexts
+            })
+
+        for context_key, group in meetings_by_context.items():
+            online_meetings = group.get("online_meetings", [])
+            if not online_meetings:
+                logger.debug(
+                    "Skipping context %s because no resolvable meeting IDs are available",
+                    context_key
+                )
+                continue
+
+            logger.info("")
+            logger.info(
+                "Processing channel attendance for %s using %d candidate meetings and %d queryable meetings",
+                context_key,
+                len(group["meetings"]),
+                len(online_meetings)
+            )
+            attendance_list = self.get_channel_attendance(
+                online_meetings,
+                meeting_candidates=group["meetings"]
+            )
+            all_attendance.extend(attendance_list)
+
+        logger.info(
+            "Extracted attendance data for %d reports across %d matched call records (out of %d call records)",
+            len(all_attendance),
+            matched_records,
+            len(call_records)
         )
         return all_attendance

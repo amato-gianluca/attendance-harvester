@@ -139,6 +139,32 @@ azure:
 
 4. **Authenticate in browser** when prompted with your Microsoft credentials
 
+## Alternate Meeting Discovery
+
+You can also start meeting discovery from Microsoft Graph call records instead of calendar events:
+
+```bash
+python main.py --user user@contoso.com
+```
+
+This changes the discovery flow to:
+
+1. Resolve the specified UPN to a directory user
+2. Query `communications/callRecords` for that participant
+3. Read `joinWebUrl` from each call record
+4. Continue with the normal join URL -> online meeting -> attendance report flow
+
+Requirements:
+
+- `auth.mode: confidential`
+- Application permission `CallRecords.Read.All`
+- `auth.target_user_id` set for the user context used on `/users/{id}/...` meeting and attendance calls
+
+Notes:
+
+- Call records are only available after a meeting ends
+- Microsoft Graph retains call records for about 30 days
+
 ## Configuration
 
 1. **Copy the template configuration**:
@@ -195,6 +221,16 @@ Run the harvester with default settings from config.yaml:
 ```bash
 python main.py
 ```
+
+### Download One User's Meetings
+
+To download attendance reports for a single user over the last N days, run:
+
+```bash
+python user_meeting_downloads.py user@example.com 30
+```
+
+This writes the JSON exports into `output/temp/user@example.com`.
 
 ### Command-Line Options
 

@@ -29,6 +29,7 @@ auth:
 
   # public: delegated auth with browser device code (default)
   # confidential: app-only client credentials (requires azure.client_secret and admin-consented application permissions)
+  # Note: CLI option --user requires confidential mode plus application permission CallRecords.Read.All.
   mode: "public"
 
   # Required only for auth.mode=confidential.

@@ -472,6 +472,60 @@ class GraphClient:
             f"Found {len(teams_events)} Teams meetings out of {len(events)} total events")
         return teams_events
 
+    def get_user(self, user_id_or_upn: str) -> dict | None:
+        """
+        Resolve a Microsoft Entra user by object ID or UPN.
+
+        Args:
+            user_id_or_upn: User object ID or user principal name
+
+        Returns:
+            User object or None if not found
+        """
+        logger.info("Resolving user: %s", user_id_or_upn)
+        response = self._make_request(
+            "GET",
+            f"/users/{user_id_or_upn}",
+            params={"$select": "id,userPrincipalName,displayName"}
+        )
+        if response.status_code == 404:
+            logger.warning("User not found: %s", user_id_or_upn)
+            return None
+        return response.json()
+
+    def get_call_records_for_participant(self, participant_id: str,
+                                         start_datetime: str,
+                                         end_datetime: str) -> list[dict]:
+        """
+        List call records for a participant in a time range.
+
+        This uses the tenant-wide call records API, which is only available
+        with application permissions.
+
+        Args:
+            participant_id: Directory object ID of the participant
+            start_datetime: Inclusive start time in ISO 8601 format
+            end_datetime: Inclusive end time in ISO 8601 format
+
+        Returns:
+            List of call record objects
+        """
+        logger.info(
+            "Fetching call records for participant %s from %s to %s",
+            participant_id,
+            start_datetime,
+            end_datetime
+        )
+        filter_param = (
+            f"participants_v2/any(p:p/id eq '{participant_id}') "
+            f"and startDateTime ge {start_datetime} "
+            f"and startDateTime le {end_datetime}"
+        )
+        return self._paginate(
+            "/communications/callRecords",
+            params={"$filter": filter_param}
+        )
+
     def get_online_meeting_by_join_url(self, join_url: str,
                                        user_id_override: str | None = None) -> dict | None:
         """

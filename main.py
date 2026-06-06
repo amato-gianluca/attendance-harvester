@@ -248,6 +248,10 @@ def parse_args() -> argparse.Namespace:
         help="Override lookahead days from config"
     )
     parser.add_argument(
+        "--user",
+        help="Use call records for the specified user UPN instead of starting from calendar events"
+    )
+    parser.add_argument(
         "--rebuild-csv",
         nargs="+",
         metavar="PATH",
@@ -331,7 +335,7 @@ def run_upload_csv_to_sharepoint(config: AppConfig) -> None:
     logger.info("✓ CSV SharePoint upload completed successfully")
 
 
-def run_harvest(config: AppConfig) -> None:
+def run_harvest(config: AppConfig, user_upn: str | None = None) -> None:
     """Run the default Teams attendance harvesting workflow."""
     logger = logging.getLogger(__name__)
 
@@ -449,15 +453,37 @@ def run_harvest(config: AppConfig) -> None:
         json_output_dir=str(config.output.json_directory)
     )
 
-    attendance_data = meeting_resolver.extract_all_attendance(
-        teams_with_channels=teams_with_channels,
-        lookback_days=config.meetings.lookback_days,
-        lookahead_days=config.meetings.lookahead_days
-    )
+    if user_upn:
+        if auth_mode != "confidential":
+            raise ValueError(
+                "--user requires auth.mode=confidential because Microsoft Graph callRecords "
+                "is only available with application permissions."
+            )
+
+        logger.info(
+            "Using call records as the meeting discovery source for user %s",
+            user_upn
+        )
+        attendance_data = meeting_resolver.extract_all_attendance_for_user(
+            teams_with_channels=teams_with_channels,
+            user_upn=user_upn,
+            lookback_days=config.meetings.lookback_days,
+            lookahead_days=config.meetings.lookahead_days
+        )
+    else:
+        attendance_data = meeting_resolver.extract_all_attendance(
+            teams_with_channels=teams_with_channels,
+            lookback_days=config.meetings.lookback_days,
+            lookahead_days=config.meetings.lookahead_days
+        )
 
     if not attendance_data:
         logger.warning("No attendance data found. This could mean:")
-        logger.warning("  - No meetings in the specified time range")
+        if user_upn:
+            logger.warning("  - No call records in the specified time range for the selected user")
+            logger.warning("  - Call records are only available after the meeting ends and only for about 30 days")
+        else:
+            logger.warning("  - No meetings in the specified time range")
         logger.warning("  - No attendance reports available (reports are organizer-only)")
         logger.warning("  - All meetings were already processed (use --skip-processed=False to re-process)")
         return
@@ -518,7 +544,7 @@ def main():
         elif args.upload_csv_to_sharepoint:
             run_upload_csv_to_sharepoint(config)
         else:
-            run_harvest(config)
+            run_harvest(config, user_upn=args.user)
     except FileNotFoundError:
         print(f"Error: Configuration file not found: {args.config}")
         print("Please copy config.yaml.template to config.yaml and fill in your settings.")
