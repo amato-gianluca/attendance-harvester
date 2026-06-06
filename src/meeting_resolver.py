@@ -57,6 +57,23 @@ class MeetingResolver:
         )
         return processed_reports
 
+    @staticmethod
+    def _normalize_meeting_subject(subject: str | None, join_url: str | None = None) -> str:
+        """Return a safe meeting subject, never exposing the join URL as a title."""
+        normalized = (subject or "").strip()
+        normalized_join_url = (join_url or "").strip()
+
+        if not normalized:
+            return "Unnamed"
+
+        if normalized_join_url and normalized == normalized_join_url:
+            return "Unnamed"
+
+        if normalized.startswith("https://") or normalized.startswith("http://"):
+            return "Unnamed"
+
+        return normalized
+
     def _get_owner_fallback_user_ids(self, matched_contexts: list[dict]) -> list[str]:
         """Return distinct owner IDs usable as fallback acting users."""
         current_user_id = self.client.user_id
@@ -81,8 +98,16 @@ class MeetingResolver:
     @staticmethod
     def _attach_event_metadata(online_meeting: dict, event: dict) -> dict:
         """Attach calendar event metadata to a resolved online meeting payload."""
+        join_url = (
+            event.get("onlineMeeting", {}).get("joinUrl")
+            or online_meeting.get("joinWebUrl", "")
+        )
+        subject = MeetingResolver._normalize_meeting_subject(
+            online_meeting.get("subject") or event.get("subject"),
+            join_url
+        )
         online_meeting["_event"] = {
-            "subject": event.get("subject"),
+            "subject": subject,
             "start": event.get("start"),
             "end": event.get("end"),
             "organizer": event.get("organizer")
@@ -94,14 +119,15 @@ class MeetingResolver:
         """Project a callRecord into the event shape used by the existing pipeline."""
         organizer = call_record.get("organizer_v2", {}).get("identity", {})
         call_record_id = call_record.get("id", "")
+        join_url = call_record.get("joinWebUrl", "")
 
         return {
             "id": call_record_id,
-            "subject": call_record.get("joinWebUrl") or f"callRecord:{call_record_id}",
+            "subject": MeetingResolver._normalize_meeting_subject(None, join_url),
             "start": {"dateTime": call_record.get("startDateTime")},
             "end": {"dateTime": call_record.get("endDateTime")},
             "organizer": organizer,
-            "onlineMeeting": {"joinUrl": call_record.get("joinWebUrl", "")},
+            "onlineMeeting": {"joinUrl": join_url},
         }
 
     def get_meetings_in_date_range(self, lookback_days: int, lookahead_days: int = 0) -> list[dict]:
@@ -188,7 +214,7 @@ class MeetingResolver:
                 "threadId": self._extract_thread_id_from_join_url(join_url)
             },
             "_event": {
-                "subject": event.get("subject"),
+                "subject": self._normalize_meeting_subject(event.get("subject"), join_url),
                 "start": event.get("start"),
                 "end": event.get("end"),
                 "organizer": event.get("organizer")
