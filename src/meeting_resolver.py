@@ -158,7 +158,8 @@ class MeetingResolver:
         return self.client.get_calendar_events(start_str, end_str)
 
     def resolve_online_meeting(self, event: dict,
-                               fallback_user_ids: list[str] | None = None) -> tuple[dict | None, str | None]:
+                               fallback_user_ids: list[str] | None = None,
+                               preferred_user_id: str | None = None) -> tuple[dict | None, str | None]:
         """
         Resolve calendar event to online meeting object.
 
@@ -179,6 +180,16 @@ class MeetingResolver:
             logger.debug(
                 f"No join URL for event: {event.get('subject', 'Unknown')}")
             return None, None
+
+        # Try a specific acting user first when the caller already knows which
+        # user's meeting inventory should be used, such as the --user flow.
+        if preferred_user_id:
+            online_meeting = self.client.get_online_meeting_by_join_url(
+                join_url,
+                user_id_override=preferred_user_id
+            )
+            if online_meeting:
+                return self._attach_event_metadata(online_meeting, event), preferred_user_id
 
         # Try to get online meeting by join URL (works for organized meetings)
         online_meeting = self.client.get_online_meeting_by_join_url(join_url)
@@ -710,10 +721,9 @@ class MeetingResolver:
                 )
                 continue
 
-            fallback_user_ids = self._get_owner_fallback_user_ids(matched_contexts)
             online_meeting, resolved_user_id = self.resolve_online_meeting(
                 event,
-                fallback_user_ids=fallback_user_ids
+                preferred_user_id=participant_id
             )
             if not online_meeting:
                 continue
